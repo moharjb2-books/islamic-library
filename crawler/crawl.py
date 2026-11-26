@@ -19,6 +19,8 @@ INGEST_URL = os.environ["INGEST_URL"].rstrip("/")
 INGEST_SECRET = os.environ["INGEST_SECRET"]
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "25"))
 DELAY = float(os.environ.get("DELAY", "1.5"))
+EMBED_BACKFILL = int(os.environ.get("EMBED_BACKFILL", "150"))
+EMBED_MAX_SCAN = int(os.environ.get("EMBED_MAX_SCAN", "150"))
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -78,6 +80,111 @@ def author_from(text):
     return m.group(1).strip() if m else ""
 
 
+
+EMBED_ERR_RE = re.compile(r"tgme_widget_message_error|Post not found")
+
+
+def embed_get(username, mid):
+    return get(f"https://t.me/{username}/{mid}?embed=1&mode=tme")
+
+
+def embed_valid(html):
+    return "tgme_widget_message " in html and not EMBED_ERR_RE.search(html)
+
+
+def probe_max_id(username, hint=0):
+    lo = max(int(hint or 0), 1)
+    hi = lo
+    step = 500
+    while True:
+        try:
+            html = embed_get(username, hi)
+        except Exception:
+            return 0
+        if embed_valid(html):
+            lo = hi
+            hi += step
+            step = min(step * 2, 8000)
+            if hi > 3000000:
+                return lo
+        else:
+            break
+        time.sleep(0.15)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        try:
+            html = embed_get(username, mid)
+        except Exception:
+            break
+        if embed_valid(html):
+            lo = mid
+        else:
+            hi = mid
+        time.sleep(0.15)
+    return lo
+
+
+def crawl_channel_embed(ch):
+    username = ch["username"]
+    last_seen = int(ch.get("last_message_id") or 0)
+    bot_member = bool(ch.get("bot_member"))
+    print(f"== @{username} EMBED mode (last={last_seen})", flush=True)
+    max_id = probe_max_id(username, last_seen)
+    if not max_id:
+        print(f"== @{username}: embed probe failed", flush=True)
+        return 0
+    if last_seen <= 0:
+        scan_from = max(1, max_id - EMBED_BACKFILL + 1)
+    else:
+        scan_from = last_seen + 1
+    scan_to = min(max_id, scan_from + EMBED_MAX_SCAN - 1)
+    total_new = 0
+    items = []
+    for mid in range(scan_from, scan_to + 1):
+        try:
+            html = embed_get(username, mid)
+        except Exception:
+            continue
+        if not embed_valid(html):
+            continue
+        title_m = DOC_TITLE_RE.search(html)
+        if not title_m:
+            continue
+        title = clean(title_m.group(1))
+        extra_m = DOC_EXTRA_RE.search(html)
+        extra = clean(extra_m.group(1)) if extra_m else ""
+        caption_m = CAPTION_RE.search(html)
+        caption = clean(caption_m.group(1)) if caption_m else ""
+        ext = ""
+        em = re.search(r"\.([A-Za-z0-9]{1,5})$", title)
+        if em:
+            ext = em.group(1).lower()
+            title = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", title).strip()
+        if caption and len(title) < 100:
+            title = title + " — " + caption[:80]
+        items.append({"message_id": mid, "title": title[:300],
+                      "author": author_from(caption or title), "ext": ext,
+                      "size_bytes": parse_size(extra)})
+        if len(items) >= 100:
+            try:
+                r = post("", {"channel": username, "items": items,
+                              "bot_member": bot_member, "last_message_id": scan_to})
+                total_new += r.get("added", 0)
+            except Exception as e:
+                print(f"  ingest failed: {e}", flush=True)
+            items = []
+        time.sleep(0.15)
+    if items:
+        try:
+            r = post("", {"channel": username, "items": items,
+                          "bot_member": bot_member, "last_message_id": scan_to})
+            total_new += r.get("added", 0)
+        except Exception as e:
+            print(f"  ingest failed: {e}", flush=True)
+    print(f"== @{username}: {total_new} new files (scanned {scan_from}-{scan_to}, max {max_id})", flush=True)
+    return total_new
+
+
 def crawl_channel(ch):
     username = ch["username"]
     last_seen = int(ch.get("last_message_id") or 0)
@@ -86,6 +193,7 @@ def crawl_channel(ch):
     before = None
     total_new = 0
     max_id = last_seen
+    saw_posts = False
     for page in range(MAX_PAGES):
         url = f"https://t.me/s/{username}" + (f"?before={before}" if before else "")
         try:
@@ -98,6 +206,7 @@ def crawl_channel(ch):
             html, re.S)
         if not posts:
             break
+        saw_posts = True
         items = []
         oldest = None
         for mid_s, block in posts:
@@ -142,6 +251,8 @@ def crawl_channel(ch):
         before = oldest
         time.sleep(DELAY)
     print(f"== @{username}: {total_new} new files, last -> {max_id}", flush=True)
+    if not saw_posts and not bot_member:
+        return crawl_channel_embed(ch)
     return total_new
 
 
