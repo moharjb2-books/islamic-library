@@ -490,6 +490,17 @@ function renderAdmin() {
     </div>`).join('')}
   </div>` : ''}
 
+  <div class="panel"><h2>📣 رسالة جماعية</h2>
+    <div class="hint">تُرسل لكل مستخدمي البوت. للصور والملفات: أرسلها للبوت بكابشن يبدأ بـ /broadcast من المحادثة.</div>
+    <div class="row"><textarea id="bcText" rows="3" style="flex:1;border:1px solid var(--line);background:#fbf7ec;border-radius:12px;padding:11px 14px;font-family:inherit;font-size:14px;outline:0;resize:vertical" placeholder="متن الرسالة..."></textarea></div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn" onclick="bcSend()">إرسال</button>
+      <button class="btn" style="background:#5c5344" onclick="bcPreview()">معاينة العدد</button>
+    </div>
+    <div id="bcInfo" class="hint" style="margin-top:8px"></div>
+    <div id="bcList"></div>
+  </div>
+
   <div class="panel"><h2>⚙ إعدادات البوت</h2>
     <div class="set-row"><span>رسالة الترحيب التلقائية</span>
       <label class="switch"><input type="checkbox" id="sWelcome" ${s.welcome_on === '1' ? 'checked' : ''}><span class="sl"></span></label></div>
@@ -549,6 +560,30 @@ window.addAdmin = async function() {
 window.rmAdmin = async function(uid) {
   await api('/api/admin/admin', { method: 'POST', data: { user: String(uid), action: 'remove' } });
   toast('أزيل المشرف'); loadAdmin();
+};
+window.bcPreview = async function() {
+  const r = await api('/api/admin/broadcast', { method: 'POST', data: { action: 'preview' } });
+  document.getElementById('bcInfo').textContent = r.users !== undefined ? `سيصل إلى ${r.users.toLocaleString('ar-EG')} مستخدم` : 'تعذر الجلب';
+};
+window.bcSend = async function() {
+  const t = document.getElementById('bcText').value.trim();
+  if (!t) return toast('اكتب الرسالة أولًا');
+  const p = await api('/api/admin/broadcast', { method: 'POST', data: { action: 'preview' } });
+  if (!confirm(`إرسال إلى ${p.users || 0} مستخدم؟`)) return;
+  const r = await api('/api/admin/broadcast', { method: 'POST', data: { action: 'send', text: t } });
+  if (r.error) return toast('تعذر الإرسال');
+  document.getElementById('bcText').value = '';
+  toast('بدأ الإرسال على دفعات');
+  bcLoadList();
+};
+window.bcLoadList = async function() {
+  const r = await api('/api/admin/broadcasts');
+  const el = document.getElementById('bcList');
+  if (!el) return;
+  el.innerHTML = (r.broadcasts || []).map(b => `<div class="ch-row">
+    <span class="cnt">✅${b.sent} ❌${b.failed} 🚫${b.blocked}</span>
+    <span class="who">${esc((b.text || b.kind).slice(0, 30))} · ${b.status === 'done' ? 'اكتمل' : b.status === 'pending' || b.status === 'sending' ? 'يُرسل...' : b.status}</span>
+  </div>`).join('');
 };
 window.exitAdmin = function() { state.isAdminView = false; state.tab = 'search'; render(); };
 

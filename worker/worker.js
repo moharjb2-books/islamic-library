@@ -42,8 +42,22 @@ const SCHEMA = [
     first_name TEXT DEFAULT '',
     username TEXT DEFAULT '',
     is_admin INTEGER DEFAULT 0,
+    blocked INTEGER DEFAULT 0,
     first_seen INTEGER DEFAULT (unixepoch()),
     last_seen INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE TABLE IF NOT EXISTS broadcasts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    admin_id INTEGER,
+    kind TEXT DEFAULT 'text',
+    text TEXT DEFAULT '',
+    file_id TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    cursor INTEGER DEFAULT 0,
+    sent INTEGER DEFAULT 0,
+    failed INTEGER DEFAULT 0,
+    blocked INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT (unixepoch())
   )`,
   `CREATE TABLE IF NOT EXISTS searches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +79,7 @@ let migrated = false;
 async function migrate(env) {
   if (migrated) return;
   for (const stmt of SCHEMA) await env.DB.prepare(stmt).run();
+  try { await env.DB.prepare('ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0').run(); } catch (e) {}
   migrated = true;
 }
 
@@ -337,6 +352,47 @@ async function handleUpdate(env, update) {
       return sendWelcome(env, settings, chatId);
     }
 
+    // ---- broadcast (admin): /broadcast <text> or caption on media ----
+    const bsrc = text || (msg.caption || '');
+    if (bsrc.startsWith('/broadcast') && msg.chat.type === 'private') {
+      if (!(await isAdmin(env, settings, from.id))) {
+        await tg(env, 'sendMessage', { chat_id: chatId, text: 'هذه المنطقة للمشرف فقط.' });
+        return;
+      }
+      const body = bsrc.replace(/^\/broadcast\s*/, '').trim();
+      const media = msg.photo ? { kind: 'photo', file_id: msg.photo[msg.photo.length - 1].file_id }
+        : msg.document ? { kind: 'document', file_id: msg.document.file_id }
+        : msg.audio ? { kind: 'audio', file_id: msg.audio.file_id }
+        : msg.video ? { kind: 'video', file_id: msg.video.file_id } : null;
+      if (!body && !media) {
+        await tg(env, 'sendMessage', { chat_id: chatId, text: 'اكتب: /broadcast متن الرسالة\nأو أرسل صورة/ملفًا بكابشن يبدأ بـ /broadcast' });
+        return;
+      }
+      const kind = media ? media.kind : 'text';
+      const fid = media ? media.file_id : '';
+      const r = await env.DB.prepare(
+        "INSERT INTO broadcasts(admin_id, kind, text, file_id, status) VALUES(?,?,?,?, 'draft')"
+      ).bind(from.id, kind, body, fid).run();
+      const bid = r.meta.last_row_id;
+      const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM users WHERE blocked = 0').first();
+      // preview: show the content itself
+      if (kind === 'text') {
+        await tg(env, 'sendMessage', { chat_id: chatId, text: '👀 معاينة:\n\n' + body });
+      } else {
+        const m = { photo: 'sendPhoto', document: 'sendDocument', audio: 'sendAudio', video: 'sendVideo' }[kind];
+        await tg(env, m, { chat_id: chatId, [kind]: fid, caption: '👀 معاينة:\n\n' + body });
+      }
+      await tg(env, 'sendMessage', {
+        chat_id: chatId,
+        text: `📣 سيتم إرسال هذه الرسالة إلى ${cnt.c} مستخدم.\nالتأكيد؟`,
+        reply_markup: { inline_keyboard: [[
+          { text: '✅ تأكيد الإرسال', callback_data: 'bc_go:' + bid },
+          { text: '❌ إلغاء', callback_data: 'bc_no:' + bid },
+        ]] },
+      });
+      return;
+    }
+
     if (text === '/admin') {
       if (await isAdmin(env, settings, from.id)) {
         await tg(env, 'sendMessage', {
@@ -426,6 +482,22 @@ async function handleUpdate(env, update) {
       await tg(env, 'sendMessage', { chat_id: chatId, text: '☆ المفضلة:', reply_markup: { inline_keyboard: keyboard } });
       return;
     }
+    if (data.startsWith('bc_go:') || data.startsWith('bc_no:')) {
+      const bid = parseInt(data.split(':')[1], 10);
+      if (!(await isAdmin(env, settings2, cb.from.id))) {
+        await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'للمشرف فقط', show_alert: true });
+        return;
+      }
+      if (data.startsWith('bc_no:')) {
+        await env.DB.prepare("UPDATE broadcasts SET status = 'canceled' WHERE id = ?").bind(bid).run();
+        await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'أُلغي الإرسال' });
+        return;
+      }
+      await env.DB.prepare("UPDATE broadcasts SET status = 'pending', cursor = 0 WHERE id = ? AND status = 'draft'").bind(bid).run();
+      await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '📣 بدأ الإرسال... ستصلك النتيجة هنا' });
+      await runBroadcastChunk(env, bid);
+      return;
+    }
     if (data === 'recheck') {
       const missing = await checkForced(env, cb.from.id);
       if (missing.length) {
@@ -509,6 +581,47 @@ async function upsertFile(env, f) {
     f.delivery || 'link'
   ).run();
   return r;
+}
+
+// ---------- broadcast sender ----------
+async function sendBroadcastTo(env, b, userId) {
+  if (b.kind === 'text') return tg(env, 'sendMessage', { chat_id: userId, text: b.text });
+  const m = { photo: 'sendPhoto', document: 'sendDocument', audio: 'sendAudio', video: 'sendVideo' }[b.kind];
+  return tg(env, m, { chat_id: userId, [b.kind]: b.file_id, caption: b.text || undefined });
+}
+
+async function runBroadcastChunk(env, bid, maxPerRun = 700) {
+  const b = await env.DB.prepare('SELECT * FROM broadcasts WHERE id = ?').bind(bid).first();
+  if (!b || !['pending', 'sending'].includes(b.status)) return;
+  await env.DB.prepare("UPDATE broadcasts SET status = 'sending' WHERE id = ?").bind(bid).run();
+  const rows = await env.DB.prepare(
+    'SELECT user_id FROM users WHERE blocked = 0 AND user_id > ? ORDER BY user_id LIMIT ?'
+  ).bind(b.cursor || 0, maxPerRun).all();
+  const users = rows.results || [];
+  let sent = 0, failed = 0, blocked = 0, lastId = b.cursor || 0;
+  for (const u of users) {
+    lastId = u.user_id;
+    try {
+      const r = await sendBroadcastTo(env, b, u.user_id);
+      if (r && r.ok) sent++;
+      else if (r && r.error_code === 403) {
+        blocked++;
+        await env.DB.prepare('UPDATE users SET blocked = 1 WHERE user_id = ?').bind(u.user_id).run();
+      } else failed++;
+    } catch (e) { failed++; }
+    await new Promise(res => setTimeout(res, 45)); // ~22 msg/s, under Telegram limits
+  }
+  const done = users.length < maxPerRun;
+  await env.DB.prepare(
+    'UPDATE broadcasts SET cursor = ?, sent = sent + ?, failed = failed + ?, blocked = blocked + ?, status = ? WHERE id = ?'
+  ).bind(lastId, sent, failed, blocked, done ? 'done' : 'sending', bid).run();
+  if (done) {
+    const b2 = await env.DB.prepare('SELECT * FROM broadcasts WHERE id = ?').bind(bid).first();
+    await tg(env, 'sendMessage', {
+      chat_id: b.admin_id,
+      text: `📣 اكتمل الإرسال:\n✅ أُرسل: ${b2.sent}\n❌ فشل: ${b2.failed}\n🚫 حظر البوت: ${b2.blocked}`,
+    });
+  }
 }
 
 // ---------- API ----------
@@ -707,6 +820,26 @@ async function handleApi(env, request, path) {
       return json({ ok: true });
     }
 
+    if (path === '/api/admin/broadcast' && request.method === 'POST') {
+      if (body.action === 'preview') {
+        const c = await env.DB.prepare('SELECT COUNT(*) AS c FROM users WHERE blocked = 0').first();
+        return json({ ok: true, users: c.c || 0 });
+      }
+      const txt = String(body.text || '').trim();
+      if (!txt) return json({ error: 'empty text' }, 400);
+      const r = await env.DB.prepare(
+        "INSERT INTO broadcasts(admin_id, kind, text, status) VALUES(?, 'text', ?, 'pending')"
+      ).bind(user.id, txt).run();
+      return json({ ok: true, id: r.meta.last_row_id });
+    }
+
+    if (path === '/api/admin/broadcasts') {
+      const rows = await env.DB.prepare(
+        'SELECT id, kind, text, status, sent, failed, blocked, created_at FROM broadcasts ORDER BY id DESC LIMIT 10'
+      ).all();
+      return json({ broadcasts: rows.results || [] });
+    }
+
     return json({ error: 'not found' }, 404);
   }
 
@@ -768,6 +901,14 @@ async function handleIngest(env, request) {
 
 // ---------- router ----------
 export default {
+  async scheduled(event, env, ctx) {
+    await migrate(env);
+    const rows = await env.DB.prepare(
+      "SELECT id FROM broadcasts WHERE status IN ('pending','sending') ORDER BY id LIMIT 3"
+    ).all();
+    for (const r of rows.results || []) ctx.waitUntil(runBroadcastChunk(env, r.id));
+  },
+
   async fetch(request, env, ctx) {
     await migrate(env);
     const url = new URL(request.url);

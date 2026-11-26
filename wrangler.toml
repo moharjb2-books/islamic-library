@@ -13,3 +13,6 @@ BOT_USERNAME = "ISLAMIC_BOOKS_LIBbot"
 MAIN_CHANNEL = "cr_wrr"
 OWNER_ID = "8036989596"
 MINIAPP_URL = "https://moharjb2-books.github.io/islamic-library/miniapp/"
+
+[triggers]
+crons = ["* * * * *"]
