@@ -46,7 +46,7 @@ def post(path, payload):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer " + INGEST_SECRET,
-            "User-Agent": "islamic-library-crawler/1.0",
+            "User-Agent": UA,
         }, method="POST")
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read().decode())
@@ -55,7 +55,7 @@ def post(path, payload):
 def get_sources():
     req = urllib.request.Request(
         INGEST_URL + "/sources",
-        headers={"Authorization": "Bearer " + INGEST_SECRET})
+        headers={"Authorization": "Bearer " + INGEST_SECRET, "User-Agent": UA})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode())["channels"]
 
