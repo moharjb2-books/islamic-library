@@ -1,0 +1,4 @@
+node_modules/
+package*.json
+deploy-secrets.env
+worker/test.mjs
