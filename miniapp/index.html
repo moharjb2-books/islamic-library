@@ -418,6 +418,8 @@ async function loadAdmin() {
     state.admin.admins = a.admins || [];
     state.admin.owner_id = a.owner_id || '';
   }
+  const sr = await api('/api/admin/searches?limit=60');
+  state.admin.searches = sr.searches || [];
   renderAdmin();
 }
 
@@ -428,6 +430,21 @@ function renderAdmin() {
   app.innerHTML = `
   <div class="admin-hero"><h1>لوحة التحكم</h1>
     <div class="sub">${a.files.toLocaleString('ar-EG')} ملف · ${a.users.toLocaleString('ar-EG')} مستخدم · ${a.channels.length} مصدر</div></div>
+
+  <div class="panel"><h2>📊 الإحصائيات</h2>
+    <div class="ch-row"><span class="cnt">الإجمالي</span><span class="who">${(a.users || 0).toLocaleString('ar-EG')} مستخدم</span></div>
+    <div class="ch-row"><span class="cnt">جدد اليوم</span><span class="who">${a.users_today || 0}</span></div>
+    <div class="ch-row"><span class="cnt">نشط اليوم</span><span class="who">${a.active_today || 0}</span></div>
+    <div class="ch-row"><span class="cnt">عمليات البحث (اليوم / الإجمالي)</span><span class="who">${a.searches_today || 0} / ${a.searches_total || 0}</span></div>
+    <div class="ch-row"><span class="cnt">بحث بلا نتائج</span><span class="who">${a.searches_no_result || 0}</span></div>
+  </div>
+
+  <div class="panel"><h2>🔍 آخر عمليات البحث</h2>
+    ${(a.searches || []).length ? a.searches.map(s => `<div class="ch-row">
+      <span class="cnt">${new Date(s.created_at * 1000).toLocaleString('ar-EG', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })} · ${s.results ? s.results + ' نتيجة' : 'بلا نتائج'}</span>
+      <span class="who" style="direction:rtl">${esc(s.q)}</span>
+    </div>`).join('') : '<div class="hint">لا عمليات بحث بعد.</div>'}
+  </div>
 
   <div class="panel"><h2>إضافة قناة أو مصدر</h2>
     <div class="hint">أضف رابط قناة تليجرام ليقوم البوت بفهرسة ملفاتها تلقائيًا وإبقائها محدثة.</div>

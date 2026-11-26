@@ -45,6 +45,14 @@ const SCHEMA = [
     first_seen INTEGER DEFAULT (unixepoch()),
     last_seen INTEGER DEFAULT (unixepoch())
   )`,
+  `CREATE TABLE IF NOT EXISTS searches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER DEFAULT 0,
+    q TEXT DEFAULT '',
+    results INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT (unixepoch())
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_searches_created ON searches(created_at DESC)`,
   `CREATE TABLE IF NOT EXISTS favorites (
     user_id INTEGER NOT NULL,
     file_id INTEGER NOT NULL,
@@ -155,6 +163,14 @@ async function trackUser(env, from) {
     `INSERT INTO users(user_id, first_name, username, last_seen) VALUES(?,?,?,unixepoch())
      ON CONFLICT(user_id) DO UPDATE SET first_name=excluded.first_name, username=excluded.username, last_seen=unixepoch()`
   ).bind(from.id, from.first_name || '', from.username || '').run();
+}
+
+async function logSearch(env, userId, q, results) {
+  if (!q || !q.trim()) return;
+  try {
+    await env.DB.prepare('INSERT INTO searches(user_id, q, results) VALUES(?,?,?)')
+      .bind(userId || 0, q.trim().slice(0, 200), results).run();
+  } catch (e) {}
 }
 
 // ---------- search ----------
@@ -338,6 +354,7 @@ async function handleUpdate(env, update) {
       // Plain search in chat
       const perPage = parseInt(settings.per_page, 10) || 10;
       const { items } = await searchFiles(env, text, 'all', 0, perPage);
+      await logSearch(env, from.id, text, items.length);
       if (!items.length) {
         await tg(env, 'sendMessage', {
           chat_id: chatId,
@@ -535,6 +552,10 @@ async function handleApi(env, request, path) {
     const off = parseInt(url.searchParams.get('off') || '0', 10) || 0;
     const perPage = parseInt(settings.per_page, 10) || 10;
     const { items, hasMore } = await searchFiles(env, q, ext, off, perPage);
+    if (q) {
+      const u = await apiUser(env, request).catch(() => null);
+      await logSearch(env, u && u.id ? u.id : 0, q, items.length);
+    }
     const counts = q ? await countExt(env, q) : null;
     return json({ items: items.map(publicFile), hasMore, counts });
   }
@@ -581,12 +602,31 @@ async function handleApi(env, request, path) {
     if (path === '/api/admin/overview') {
       const files = await env.DB.prepare('SELECT COUNT(*) AS c FROM files').first();
       const users = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first();
+      const usersToday = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM users WHERE first_seen >= unixepoch('now','start of day')").first();
+      const activeToday = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM users WHERE last_seen >= unixepoch('now','start of day')").first();
+      const searchesTotal = await env.DB.prepare('SELECT COUNT(*) AS c FROM searches').first();
+      const searchesToday = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM searches WHERE created_at >= unixepoch('now','start of day')").first();
+      const noResult = await env.DB.prepare('SELECT COUNT(*) AS c FROM searches WHERE results = 0').first();
       const chans = await env.DB.prepare('SELECT * FROM channels ORDER BY added_at DESC').all();
       const forced = await env.DB.prepare('SELECT * FROM forced_channels ORDER BY username').all();
       return json({
         files: files.c || 0, users: users.c || 0,
+        users_today: usersToday.c || 0, active_today: activeToday.c || 0,
+        searches_total: searchesTotal.c || 0, searches_today: searchesToday.c || 0,
+        searches_no_result: noResult.c || 0,
         channels: chans.results || [], forced: forced.results || [], settings,
       });
+    }
+
+    if (path === '/api/admin/searches') {
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 300);
+      const rows = await env.DB.prepare(
+        'SELECT user_id, q, results, created_at FROM searches ORDER BY id DESC LIMIT ?'
+      ).bind(limit).all();
+      return json({ searches: rows.results || [] });
     }
 
     if (path === '/api/admin/channel' && request.method === 'POST') {
