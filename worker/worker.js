@@ -10,6 +10,7 @@ const SCHEMA = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     title_norm TEXT NOT NULL,
+    file_name TEXT DEFAULT '',
     author TEXT DEFAULT '',
     author_norm TEXT DEFAULT '',
     ext TEXT DEFAULT '',
@@ -80,6 +81,7 @@ async function migrate(env) {
   if (migrated) return;
   for (const stmt of SCHEMA) await env.DB.prepare(stmt).run();
   try { await env.DB.prepare('ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0').run(); } catch (e) {}
+  try { await env.DB.prepare("ALTER TABLE files ADD COLUMN file_name TEXT DEFAULT ''").run(); } catch (e) {}
   migrated = true;
 }
 
@@ -248,7 +250,7 @@ async function deliverFile(env, settings, chatId, file) {
   if (file.link) {
     return tg(env, 'sendMessage', {
       chat_id: chatId,
-      text: `📕 ${file.title}\n📎 ${file.ext ? file.ext.toUpperCase() + ' · ' : ''}${fmtSize(file.size_bytes)}`,
+      text: `📕 ${file.file_name || file.title}\n📎 ${file.ext ? file.ext.toUpperCase() + ' · ' : ''}${fmtSize(file.size_bytes)}`,
       reply_markup: { inline_keyboard: [[{ text: '⬇️ فتح الملف في القناة', url: file.link }]] },
     });
   }
@@ -283,7 +285,7 @@ async function handleUpdate(env, update) {
         const username = (msg.chat.username || '').toLowerCase();
         const title = doc.file_name || msg.caption || 'ملف';
         await upsertFile(env, {
-          title, author: extractAuthor(title, msg.caption),
+          title, file_name: doc.file_name || '', author: extractAuthor(title, msg.caption),
           ext: extOf(doc.file_name || ''), size_bytes: doc.file_size || 0,
           channel: username, message_id: msg.message_id,
           link: username ? `https://t.me/${username}/${msg.message_id}` : '',
@@ -308,7 +310,7 @@ async function handleUpdate(env, update) {
         ? msg.forward_from_chat.username.toLowerCase() : '';
       const title = doc.file_name || msg.caption || 'ملف';
       await upsertFile(env, {
-        title, author: extractAuthor(title, msg.caption),
+        title, file_name: doc.file_name || '', author: extractAuthor(title, msg.caption),
         ext: extOf(doc.file_name || ''), size_bytes: doc.file_size || 0,
         channel: fwd, message_id: msg.forward_from_message_id || 0,
         link: fwd && msg.forward_from_message_id ? `https://t.me/${fwd}/${msg.forward_from_message_id}` : '',
@@ -420,7 +422,7 @@ async function handleUpdate(env, update) {
       }
       const missing = await checkForced(env, from.id);
       const keyboard = items.map(f => {
-        const label = `📕 ${f.title.slice(0, 40)} (${(f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${(f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') {
           return [{ text: label, callback_data: 'dl:' + f.id }];
         }
@@ -457,7 +459,7 @@ async function handleUpdate(env, update) {
         return;
       }
       const keyboard = items.map(f => {
-        const label = `📕 ${f.title.slice(0, 40)} (${(f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${(f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id }];
         return [{ text: label, url: f.link }];
       });
@@ -475,7 +477,7 @@ async function handleUpdate(env, update) {
         return;
       }
       const keyboard = items.map(f => {
-        const label = `📕 ${f.title.slice(0, 40)} (${(f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${(f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id }];
         return [{ text: label, url: f.link }];
       });
@@ -570,13 +572,15 @@ function extractAuthor(title, caption) {
 
 async function upsertFile(env, f) {
   const r = await env.DB.prepare(
-    `INSERT INTO files(title, title_norm, author, author_norm, ext, size_bytes, channel, message_id, link, file_id, delivery)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?)
+    `INSERT INTO files(title, title_norm, file_name, author, author_norm, ext, size_bytes, channel, message_id, link, file_id, delivery)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(channel, message_id, title_norm) DO UPDATE SET
        file_id = CASE WHEN excluded.file_id != '' THEN excluded.file_id ELSE files.file_id END,
+       file_name = CASE WHEN excluded.file_name != '' THEN excluded.file_name ELSE files.file_name END,
+       size_bytes = CASE WHEN excluded.size_bytes > 0 THEN excluded.size_bytes ELSE files.size_bytes END,
        delivery = CASE WHEN excluded.delivery = 'link' THEN files.delivery ELSE excluded.delivery END`
   ).bind(
-    f.title, norm(f.title), f.author || '', norm(f.author || ''), f.ext || '',
+    f.title, norm(f.title), String(f.file_name || '').slice(0, 500), f.author || '', norm(f.author || ''), f.ext || '',
     f.size_bytes || 0, f.channel || '', f.message_id || 0, f.link || '', f.file_id || '',
     f.delivery || 'link'
   ).run();
@@ -848,7 +852,7 @@ async function handleApi(env, request, path) {
 
 function publicFile(f) {
   return {
-    id: f.id, title: f.title, author: f.author, ext: f.ext,
+    id: f.id, title: f.title, file_name: f.file_name || f.title, author: f.author, ext: f.ext,
     size_bytes: f.size_bytes, size: fmtSize(f.size_bytes),
     channel: f.channel, link: f.link,
     deliverable: Boolean(f.file_id) || f.delivery === 'copy',
@@ -879,7 +883,7 @@ async function handleIngest(env, request) {
     if (!title || !it.message_id) continue;
     const delivery = it.file_id ? 'copy' : (body.bot_member ? 'copy' : 'link');
     const r = await upsertFile(env, {
-      title, author: String(it.author || '').slice(0, 200),
+      title, file_name: String(it.file_name || '').slice(0, 500), author: String(it.author || '').slice(0, 200),
       ext: String(it.ext || '').toLowerCase(), size_bytes: Number(it.size_bytes) || 0,
       channel, message_id: Number(it.message_id),
       link: `https://t.me/${channel}/${it.message_id}`,

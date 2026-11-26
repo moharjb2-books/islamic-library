@@ -151,6 +151,7 @@ def crawl_channel_embed(ch):
         if not title_m:
             continue
         title = clean(title_m.group(1))
+        file_name = title[:500]
         extra_m = DOC_EXTRA_RE.search(html)
         extra = clean(extra_m.group(1)) if extra_m else ""
         caption_m = CAPTION_RE.search(html)
@@ -162,7 +163,7 @@ def crawl_channel_embed(ch):
             title = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", title).strip()
         if caption and len(title) < 100:
             title = title + " — " + caption[:80]
-        items.append({"message_id": mid, "title": title[:300],
+        items.append({"message_id": mid, "title": title[:300], "file_name": file_name,
                       "author": author_from(caption or title), "ext": ext,
                       "size_bytes": parse_size(extra)})
         if len(items) >= 100:
@@ -218,6 +219,7 @@ def crawl_channel(ch):
             if not title_m:
                 continue
             title = clean(title_m.group(1))
+            file_name = title[:500]
             extra = clean((DOC_EXTRA_RE.search(block) or [None, ""])[1] if DOC_EXTRA_RE.search(block) else "")
             caption_m = CAPTION_RE.search(block)
             caption = clean(caption_m.group(1)) if caption_m else ""
@@ -231,6 +233,7 @@ def crawl_channel(ch):
             items.append({
                 "message_id": mid,
                 "title": title[:300],
+                "file_name": file_name,
                 "author": author_from(caption or title),
                 "ext": ext,
                 "size_bytes": parse_size(extra),
