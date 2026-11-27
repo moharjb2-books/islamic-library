@@ -257,6 +257,7 @@ for (const [p, b] of [
   const m = tgCalls.find(c => c.method === 'sendMessage' && c.body.chat_id === 12345);
   const mk = m ? JSON.stringify(m.body.reply_markup || {}) : '';
   check('not-found also offers archive.org links (federated fallback)', Boolean(m) && /archive.org/.test(m.body.text || '') && mk.includes('archive.org/details/tafsir-ibn-kathir-01'), JSON.stringify(m && m.body).slice(0, 300));
+  check('not-found offers Sunni external-library search links', mk.includes('shamela.ws/search?q=') && mk.includes('waqfeya.net/search?q=') && mk.includes('dorar.net/site/search?skeys=') && mk.includes('islamhouse.com/ar/search/'), mk.slice(0, 300));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

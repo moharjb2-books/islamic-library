@@ -428,6 +428,19 @@ async function setSetting(env, key, value) {
 // Link-only federated search: when the local library has no match, offer a
 // few archive.org links. No hosting, no D1 writes; results cached in-isolate.
 const iaCache = new Map();
+// Sunni-curated external libraries: link-only federated fallback (no API key needed).
+const EXT_LIBS = [
+  ['📚 الشاملة', e => 'https://shamela.ws/search?q=' + e],
+  ['🕌 الوقفية', e => 'https://waqfeya.net/search?q=' + e],
+  ['📿 الدرر السنية', e => 'https://dorar.net/site/search?skeys=' + e],
+  ['🌐 إسلام هاوس', e => 'https://islamhouse.com/ar/search/?q=' + e],
+];
+function extLibRows(query) {
+  const e = encodeURIComponent(query);
+  const btns = EXT_LIBS.map(([label, f]) => ({ text: label, url: f(e), style: 'primary' }));
+  return [btns.slice(0, 2), btns.slice(2)];
+}
+
 async function iaSearch(env, q, limit = 3) {
   const key = (q || '').toLowerCase().trim();
   if (!key) return [];
@@ -958,11 +971,13 @@ async function handleUpdate(env, update, ctx2) {
         ]);
         const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: `🔎 ${String(g.title).slice(0, 45)}`, callback_data: 'sq:' + g.id, style: 'primary', icon_custom_emoji_id: ICON.search }]);
         for (const e of ext) kb.push([{ text: `🌐 ${e.title}`, url: e.url, style: 'primary' }]);
+        for (const row of extLibRows(text)) kb.push(row);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
           text: `🔍 لم أجد نتائج مطابقة لـ«${text}».`
             + (sug.length ? '\n\nهل تقصد:' : '')
             + (ext.length ? '\n\n🌐 من مكتبة الإنترنت archive.org (روابط خارجية):' : '')
+            + '\n\n🔗 أو ابحث في مكتبات سنّية موثوقة:'
             + (!sug.length && !ext.length ? '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.' : ''),
           reply_markup: kb.length ? { inline_keyboard: kb } : undefined,
         });

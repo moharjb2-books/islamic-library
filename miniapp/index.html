@@ -419,16 +419,31 @@ function chipsHtml() {
   }).join('') + `</div>`;
 }
 
+function extLinksHtml(q) {
+  const e = encodeURIComponent(q);
+  const links = [
+    ['📚 الشاملة', 'https://shamela.ws/search?q=' + e],
+    ['🕌 الوقفية', 'https://waqfeya.net/search?q=' + e],
+    ['📿 الدرر السنية', 'https://dorar.net/site/search?skeys=' + e],
+    ['🌐 إسلام هاوس', 'https://islamhouse.com/ar/search/?q=' + e],
+  ];
+  return `<div class="sug"><div class="sug-lbl">🔗 بحث خارجي (مكتبات سنّية موثوقة):</div>`
+    + links.map(([t, u]) => `<button onclick="openExtLib('${u}')">${t}</button>`).join('') + `</div>`;
+}
+window.openExtLib = function(u) { if (tg && tg.openLink) tg.openLink(u); else window.open(u, '_blank'); };
+
 function resultsHtml() {
   if (state.loading) return `<div class="spin">جارٍ البحث...</div>`;
   if (!state.items.length) {
-    if (state.q && state.suggestions && state.suggestions.length) {
-      return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.
-        <div class="sug"><div class="sug-lbl">هل تقصد:</div>
-        ${state.suggestions.map((g, i) => `<button onclick="pickSug(${i})">🔎 ${g.title.replace(/</g, '&lt;')}</button>`).join('')}
-        </div></div>`;
+    if (!state.q) {
+      return `<div class="empty"><span class="big">📚</span>المكتبة قيد الفهرسة.<br>ستظهر الكتب هنا فور إضافتها.</div>`;
     }
-    return `<div class="empty"><span class="big">📚</span>${state.q ? 'لا توجد نتائج مطابقة.<br>جرّب اسمًا أقصر أو جزءًا منه.' : 'المكتبة قيد الفهرسة.<br>ستظهر الكتب هنا فور إضافتها.'}</div>`;
+    const sugHtml = (state.suggestions && state.suggestions.length)
+      ? `<div class="sug"><div class="sug-lbl">هل تقصد:</div>
+        ${state.suggestions.map((g, i) => `<button onclick="pickSug(${i})">🔎 ${g.title.replace(/</g, '&lt;')}</button>`).join('')}
+        </div>`
+      : '<br>جرّب اسمًا أقصر أو جزءًا منه.';
+    return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.` + sugHtml + extLinksHtml(state.q) + `</div>`;
   }
   const head = state.q ? `<div class="sec-head"><h2>نتائج البحث</h2></div>`
     : (state.tab === 'search' ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '');
