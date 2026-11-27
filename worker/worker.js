@@ -496,8 +496,10 @@ async function iaSearch(env, q, limit = 3) {
           if (!pick) return page;
           const mb = pick.size ? Math.round(Number(pick.size) / 1e6) : 0;
           return {
-            title: title.slice(0, 36) + (mb ? ` · ${mb}MB` : ''),
+            title: title.slice(0, 36),
             url: `${base}/download/${encodeURIComponent(d.identifier)}/${encodeURIComponent(pick.name)}`,
+            kind: /\.epub$/i.test(pick.name || '') ? 'EPUB' : 'PDF',
+            sizeMb: mb,
           };
         } finally { clearTimeout(t2); }
       } catch (e) { return page; }
@@ -556,7 +558,7 @@ async function ajSearch(env, q, limit = 3) {
         } finally { clearTimeout(t2); }
       } catch (e) {}
       if (!pdf && !alt) return null;
-      return { title, url: pdf || alt, alt: pdf ? alt : null, altKind, lib: strip(b.library && b.library.name) };
+      return { title, url: pdf || alt, alt: pdf ? alt : null, altKind, kind: pdf ? 'PDF' : altKind, sizeMb: 0, lib: strip(b.library && b.library.name) };
     }));
     // Dedupe editions: same direct file, or same author + same normalized title
     // (punctuation/edition markers ignored), keeps only its first hit.
@@ -604,6 +606,7 @@ async function kbSearch(env, q, limit = 3) {
           url: `https://ketabonline.com/ar/books/${b.id}`,
           pdf: pdf ? pdf.url : null,
           pdfSize: pdf && pdf.size ? Math.round(Number(pdf.size) / 1e6) : 0,
+          kind: pdf ? 'PDF' : '',
         };
       });
     kbCache.set(key, { at: Date.now(), items });
@@ -792,16 +795,24 @@ function polishLocal(items, mainChannel) {
   for (const f of seen.values()) (f.channel === mainChannel ? own : other).push(f);
   return own.concat(other);
 }
+// External rows look like the channel rows: 📕 title (FORMAT · size), one tap downloads.
+function fmtExtLabel(e) {
+  const bits = [];
+  if (e.kind) bits.push(e.kind);
+  const mb = e.sizeMb || e.pdfSize || 0;
+  if (mb) bits.push(mb + 'MB');
+  return `📕 ${e.title}${bits.length ? ' (' + bits.join(' ') + ')' : ''}`;
+}
 function extRows(aj, ext, kbk) {
   const rows = [];
   for (const a of aj) {
-    const row = [{ text: `📘 ${a.title}`, url: a.url, style: 'success' }];
+    const row = [{ text: fmtExtLabel(a), url: a.url, style: 'success' }];
     if (a.alt) row.push({ text: `⬇️ ${a.altKind}`, url: a.alt, style: 'primary' });
     rows.push(row);
   }
-  for (const e of ext) rows.push([{ text: `🌐 ${e.title}`, url: e.url, style: 'primary' }]);
+  for (const e of ext) rows.push([{ text: fmtExtLabel(e), url: e.url, style: 'primary' }]);
   for (const k of kbk) {
-    const row = [{ text: `📗 ${k.title}`, url: k.url, style: 'primary' }];
+    const row = [{ text: fmtExtLabel(k), url: k.url, style: 'primary' }];
     if (k.pdf) row.push({ text: `⬇️ PDF${k.pdfSize ? ' ' + k.pdfSize + 'MB' : ''}`, url: k.pdf, style: 'success' });
     rows.push(row);
   }
@@ -1541,9 +1552,9 @@ async function handleApi(env, request, path, ctx2) {
     let suggestions = null;
     if (q && !local.length) { try { suggestions = await suggestTitles(env, q, 3); } catch (e) {} }
     const cap = local.length ? 2 : 3;
-    const external = (aj2 || []).slice(0, cap).map(a2 => ({ title: a2.title, url: a2.url, src: 'aj' }))
-      .concat((ext2 || []).slice(0, cap).map(e2 => ({ ...e2, src: 'ia' })))
-      .concat((kb2 || []).slice(0, cap).map(k2 => ({ title: k2.title, url: k2.pdf || k2.url, src: 'kb' })));
+    const external = (aj2 || []).slice(0, cap).map(a2 => ({ title: a2.title, url: a2.url, src: 'aj', kind: a2.kind || '', sizeMb: a2.sizeMb || 0 }))
+      .concat((ext2 || []).slice(0, cap).map(e2 => ({ title: e2.title, url: e2.url, src: 'ia', kind: e2.kind || '', sizeMb: e2.sizeMb || 0 })))
+      .concat((kb2 || []).slice(0, cap).map(k2 => ({ title: k2.title, url: k2.pdf || k2.url, src: 'kb', kind: k2.kind || '', sizeMb: k2.pdfSize || 0 })));
     return json({ items: local.map(publicFile), hasMore, counts, suggestions, external });
   }
 

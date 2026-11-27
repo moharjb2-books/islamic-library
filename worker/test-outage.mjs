@@ -156,6 +156,7 @@ check('bot search returns snapshot results with D1 dead', Boolean(resMsg && JSON
   const lbls = [...mk.matchAll(/"text":"([^"]+)"/g)].map(x => x[1]);
   check('has-results labels are clean (no underscores / raw extensions)', lbls.length > 0 && lbls.every(l => !/\.(pdf|epub|docx)/i.test(l) && !/\w_\w/.test(l)), JSON.stringify(lbls).slice(0, 300));
   check('has-results text explains ordering (his channel first)', tx.includes('قناتك أولًا'), tx.slice(0, 200));
+  check('external rows look like channel rows (uniform 📕 labels)', lbls.filter(l => l.startsWith('📕')).length >= 4, JSON.stringify(lbls).slice(0, 300));
 }
 // local duplicate rows collapse to one (largest copy kept)
 {
@@ -185,6 +186,7 @@ const apiR = await worker.fetch(new Request('http://local/api/search?q=' + encod
 const apiJ = await apiR.json();
 check('api/search works with D1 dead', Array.isArray(apiJ.items) && apiJ.items.length > 0, JSON.stringify(apiJ).slice(0, 200));
 check('api/search has-results carries external sources too', Array.isArray(apiJ.external) && apiJ.external.length > 0 && apiJ.external.some(e2 => e2.src === 'aj'), JSON.stringify(apiJ.external || []).slice(0, 200));
+check('external entries carry card metadata (kind + sizeMb + url)', apiJ.external.every(e2 => e2.url && 'kind' in e2 && 'sizeMb' in e2) && apiJ.external.some(e2 => e2.src === 'ia' && e2.kind === 'PDF'), JSON.stringify(apiJ.external || []).slice(0, 250));
 check('api/search item titles are clean', apiJ.items.every(i2 => !/[_.](pdf|epub|docx)/i.test(i2.file_name || '')), (apiJ.items[0] || {}).file_name || '');
 
 // 5. api/stats falls back to snapshot meta

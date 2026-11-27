@@ -432,20 +432,38 @@ function extLinksHtml(q) {
 }
 window.openExtLib = function(u) { if (tg && tg.openLink) tg.openLink(u); else window.open(u, '_blank'); };
 
+// External books render as the same card shape as channel books.
+const EXT_SRC_LABEL = { aj: 'الجامع · aljam3.com', ia: 'archive.org', kb: 'كتاب أونلاين · ketabonline.com' };
+function extCardHtml(e2) {
+  const size = e2.sizeMb ? e2.sizeMb + ' MB' : '';
+  const url = String(e2.url).replace(/'/g, '%27');
+  return `<div class="card">
+    <div class="info">
+      <h3>${esc(e2.title)}</h3>
+      <div class="fname">${esc(EXT_SRC_LABEL[e2.src] || e2.src)}</div>
+      ${size ? `<div class="fsize">${esc(size)}</div>` : ''}
+      <div class="tags">
+        <span class="tag ext">${esc(e2.kind || 'رابط')}</span>
+        ${size ? `<span class="tag size">${esc(size)}</span>` : ''}
+      </div>
+      <button class="dl" onclick="openExtLib('${url}')">⬇ تحميل</button>
+    </div>
+    <div class="letter" style="background:${colorFor(e2.title)}">${esc(letterFor(e2.title))}</div>
+  </div>`;
+}
 function extSectionsHtml() {
   const ext = state.external || [];
   if (!ext.length) return '';
-  const extBtn = (e2, ic) => `<button onclick="openExtLib('${String(e2.url).replace(/'/g, '%27')}')">${ic} ${String(e2.title).replace(/</g, '&lt;')}</button>`;
   let h = '';
   if (ext.some(e2 => e2.src === 'aj'))
-    h += `<div class="sug"><div class="sug-lbl">📘 من الجامع aljam3.com (تحميل مباشر):</div>`
-      + ext.filter(e2 => e2.src === 'aj').map(e2 => extBtn(e2, '📘')).join('') + `</div>`;
+    h += `<div class="sec-head"><h2>📘 من الجامع aljam3.com</h2></div><div class="list">`
+      + ext.filter(e2 => e2.src === 'aj').map(extCardHtml).join('') + `</div>`;
   if (ext.some(e2 => e2.src === 'ia'))
-    h += `<div class="sug"><div class="sug-lbl">🌐 تحميل مباشر من archive.org:</div>`
-      + ext.filter(e2 => e2.src === 'ia').map(e2 => extBtn(e2, '⬇️')).join('') + `</div>`;
+    h += `<div class="sec-head"><h2>🌐 من archive.org</h2></div><div class="list">`
+      + ext.filter(e2 => e2.src === 'ia').map(extCardHtml).join('') + `</div>`;
   if (ext.some(e2 => e2.src === 'kb'))
-    h += `<div class="sug"><div class="sug-lbl">📗 من موقع كتاب أونلاين:</div>`
-      + ext.filter(e2 => e2.src === 'kb').map(e2 => extBtn(e2, '📗')).join('') + `</div>`;
+    h += `<div class="sec-head"><h2>📗 من كتاب أونلاين</h2></div><div class="list">`
+      + ext.filter(e2 => e2.src === 'kb').map(extCardHtml).join('') + `</div>`;
   return h;
 }
 
