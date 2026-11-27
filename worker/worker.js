@@ -1108,13 +1108,13 @@ async function sendWelcome(env, settings, chatId) {
     `ابحث عن أي كتاب أو ملف باسمه، وسأحضره لك فورًا من المكتبة.\n\n` +
     `أرسل اسم الكتاب مباشرة في المحادثة، أو افتح صفحة البحث لتصفية النتائج حسب النوع والحجم.`;
   const lastRow = [];
-  if (env.MAIN_CHANNEL) lastRow.push({ text: '📢 القناة الرئيسية', url: 'https://t.me/' + env.MAIN_CHANNEL });
-  lastRow.push({ text: 'ℹ️ طريقة الاستخدام', callback_data: 'help' });
+  if (env.MAIN_CHANNEL) lastRow.push({ text: '📢 القناة الرئيسية', url: 'https://t.me/' + env.MAIN_CHANNEL, style: 'primary' });
+  lastRow.push({ text: 'ℹ️ طريقة الاستخدام', callback_data: 'help', style: 'primary' });
   const keyboard = [
-    [{ text: '🔍 فتح صفحة البحث', web_app: { url: env.MINIAPP_URL } }],
+    [{ text: '🔍 فتح صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success' }],
     [
-      { text: '📚 أحدث الإضافات', callback_data: 'latest' },
-      { text: '☆ المفضلة', callback_data: 'favs' },
+      { text: '📚 أحدث الإضافات', callback_data: 'latest', style: 'primary' },
+      { text: '⭐ المفضلة', callback_data: 'favs', style: 'primary' },
     ],
     lastRow,
   ];
