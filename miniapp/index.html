@@ -248,7 +248,20 @@ function tgConfirm(msg) {
     if (window.Telegram && Telegram.WebApp && Telegram.WebApp.showConfirm) {
       try { return Telegram.WebApp.showConfirm(msg, ok => res(!!ok)); } catch (e) {}
     }
-    res(window.confirm(msg));
+    let dlg = document.getElementById('cfm');
+    if (!dlg) {
+      dlg = document.createElement('div');
+      dlg.id = 'cfm';
+      dlg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:999';
+      document.body.appendChild(dlg);
+    }
+    dlg.innerHTML = `<div style="background:#fffdf7;border-radius:14px;padding:18px 20px;max-width:300px;text-align:center">
+      <div style="margin-bottom:14px;font-size:14.5px;color:#221f1a">${esc(msg)}</div>
+      <button id="cfmYes" class="btn" style="margin-left:8px">تأكيد</button>
+      <button id="cfmNo" class="btn" style="background:#8a8171">إلغاء</button></div>`;
+    dlg.style.display = 'flex';
+    dlg.querySelector('#cfmYes').onclick = () => { dlg.style.display = 'none'; res(true); };
+    dlg.querySelector('#cfmNo').onclick = () => { dlg.style.display = 'none'; res(false); };
   });
 }
 
