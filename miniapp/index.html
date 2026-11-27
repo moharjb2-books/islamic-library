@@ -124,6 +124,10 @@ h1, h2, h3, .serif { font-family: 'Thmanyah Serif', serif; }
 
 .empty { text-align: center; color: var(--muted); padding: 44px 20px; font-size: 14.5px; line-height: 2; }
 .empty .big { font-size: 42px; display: block; margin-bottom: 8px; }
+.sug { margin-top: 14px; }
+.sug .sug-lbl { color: var(--muted); font-size: 13.5px; margin-bottom: 8px; }
+.sug button { display: block; width: 100%; margin: 6px 0; padding: 11px 14px; border-radius: 12px; border: 1px solid var(--gold, #c9a227); background: transparent; color: var(--fg); font-size: 14px; cursor: pointer; text-align: right; font-family: inherit; }
+.sug button:active { opacity: .7; }
 
 /* ---------- bottom nav ---------- */
 .nav {
@@ -300,6 +304,14 @@ window.setTab = function(tab) {
   else render();
 };
 window.onSearchInput = function(v) { state.q = v; };
+window.pickSug = function(i) {
+  const t = (state.suggestions || [])[i];
+  if (!t) return;
+  state.q = t.title;
+  const inp = document.querySelector('.searchbar input');
+  if (inp) inp.value = t;
+  doSearch();
+};
 
 async function doSearch() {
   const q = state.q;
@@ -307,17 +319,17 @@ async function doSearch() {
   if (document.getElementById('results')) updateSearchResults(); else render();
   const r = await api(`/api/search?q=${encodeURIComponent(q)}&ext=${state.ext}`);
   if (q !== state.q) return;
-  state.items = r.items || []; state.hasMore = r.hasMore; state.counts = r.counts || null;
+  state.items = r.items || []; state.hasMore = r.hasMore; state.counts = r.counts || null; state.suggestions = r.suggestions || null;
   state.loading = false;
   if (document.getElementById('results')) updateSearchResults(); else render();
 }
 async function loadLatest() {
   const r = await api('/api/latest');
-  state.items = r.items || []; state.hasMore = r.hasMore; state.counts = null; render();
+  state.items = r.items || []; state.hasMore = r.hasMore; state.counts = null; state.suggestions = null; render();
 }
 async function loadFavs() {
   const r = await api('/api/favs');
-  state.items = r.items || []; state.counts = null; state.hasMore = false;
+  state.items = r.items || []; state.counts = null; state.hasMore = false; state.suggestions = null;
   (r.items || []).forEach(f => state.favs[f.id] = true);
   render();
 }
@@ -362,7 +374,15 @@ function chipsHtml() {
 
 function resultsHtml() {
   if (state.loading) return `<div class="spin">جارٍ البحث...</div>`;
-  if (!state.items.length) return `<div class="empty"><span class="big">📚</span>${state.q ? 'لا توجد نتائج مطابقة.<br>جرّب اسمًا أقصر أو جزءًا منه.' : 'المكتبة قيد الفهرسة.<br>ستظهر الكتب هنا فور إضافتها.'}</div>`;
+  if (!state.items.length) {
+    if (state.q && state.suggestions && state.suggestions.length) {
+      return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.
+        <div class="sug"><div class="sug-lbl">هل تقصد:</div>
+        ${state.suggestions.map((g, i) => `<button onclick="pickSug(${i})">🔎 ${g.title.replace(/</g, '&lt;')}</button>`).join('')}
+        </div></div>`;
+    }
+    return `<div class="empty"><span class="big">📚</span>${state.q ? 'لا توجد نتائج مطابقة.<br>جرّب اسمًا أقصر أو جزءًا منه.' : 'المكتبة قيد الفهرسة.<br>ستظهر الكتب هنا فور إضافتها.'}</div>`;
+  }
   const head = state.q ? `<div class="sec-head"><h2>نتائج البحث</h2></div>`
     : (state.tab === 'search' ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '');
   let h = head + `<div class="list">${state.items.map(cardHtml).join('')}</div>`;

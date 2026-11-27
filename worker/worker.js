@@ -237,6 +237,65 @@ async function countExt(env, q) {
   return out;
 }
 
+// ---------- fuzzy suggestions ----------
+function editDist(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  const dp = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = dp[0]; dp[0] = i; let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      const t = dp[j];
+      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = t;
+      if (dp[j] < rowMin) rowMin = dp[j];
+    }
+    if (rowMin > max) return max + 1;
+  }
+  return dp[b.length];
+}
+
+function tokenScore(nq, cand) {
+  const qw = nq.split(/\s+/).filter(Boolean);
+  const cw = String(cand || '').split(/[\s_\-–—.,()]+/).filter(Boolean);
+  if (!qw.length || !cw.length) return 99;
+  let total = 0;
+  for (const w of qw) {
+    let best = 4;
+    for (const c of cw) {
+      const nc = norm(c);
+      if (!nc) continue;
+      if (nc.includes(w) || w.includes(nc)) { best = Math.min(best, Math.abs(nc.length - w.length) > 2 ? 0.5 : 0); continue; }
+      best = Math.min(best, editDist(w, nc, 3));
+    }
+    total += best;
+  }
+  return total / qw.length;
+}
+
+async function suggestTitles(env, q, limit = 3) {
+  const nq = norm(q);
+  if (!nq || nq.length < 3) return [];
+  const rows = await env.DB.prepare(
+    'SELECT id, title, title_norm, file_name FROM files ORDER BY id DESC LIMIT 4000'
+  ).all();
+  const scored = [];
+  for (const r of rows.results || []) {
+    const sc = Math.min(tokenScore(nq, r.title_norm || r.title), tokenScore(nq, norm(r.file_name || '')));
+    if (sc <= 1.2) scored.push({ id: r.id, title: r.title, sc });
+  }
+  scored.sort((a, b) => a.sc - b.sc);
+  const seen = new Set();
+  const out = [];
+  for (const t of scored) {
+    const k = norm(t.title);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ id: t.id, title: t.title });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 // ---------- file delivery ----------
 async function deliverFile(env, settings, chatId, file) {
   const protect = settings.protect_content === '1';
@@ -425,9 +484,12 @@ async function handleUpdate(env, update) {
       const { items } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
       await logSearch(env, from.id, text, items.length);
       if (!items.length) {
+        const sug = await suggestTitles(env, text, 3);
+        const kb = sug.map(g => [{ text: `🔎 ${g.title.slice(0, 45)}`, callback_data: 'sq:' + g.id }]);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
-          text: `🔍 لم أجد نتائج مطابقة لـ«${text}».\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.`,
+          text: `🔍 لم أجد نتائج مطابقة لـ«${text}».` + (sug.length ? '\n\nهل تقصد:' : '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.'),
+          reply_markup: kb.length ? { inline_keyboard: kb } : undefined,
         });
         return;
       }
@@ -519,6 +581,29 @@ async function handleUpdate(env, update) {
         await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '✅ تم التحقق، يمكنك الاستخدام الآن' });
         await tg(env, 'sendMessage', { chat_id: chatId, text: '✅ تم التحقق من اشتراكك. أرسل اسم الكتاب للبحث.' });
       }
+      return;
+    }
+    if (data.startsWith('sq:')) {
+      const id = parseInt(data.slice(3), 10);
+      const f = await env.DB.prepare('SELECT title FROM files WHERE id = ?').bind(id).first();
+      await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
+      if (!f) return;
+      const q2 = f.title.split(/\s+/).slice(0, 5).join(' ');
+      const perPage2 = parseInt(settings2.per_page, 10) || 10;
+      const { items } = await searchFiles(env, q2, 'all', 0, perPage2);
+      await logSearch(env, cb.from.id, q2, items.length);
+      if (!items.length) {
+        await tg(env, 'sendMessage', { chat_id: chatId, text: `🔍 لم أجد نتائج مطابقة لـ«${q2}».` });
+        return;
+      }
+      const missing = await checkForced(env, cb.from.id);
+      const keyboard = items.map(f2 => {
+        const label = `📕 ${(f2.file_name || f2.title).slice(0, 40)} (${isAudioExt(f2.ext) ? 'صوتي' : (f2.ext || '').toUpperCase()} ${fmtSize(f2.size_bytes)})`;
+        if (f2.file_id || f2.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f2.id }];
+        return [{ text: label, url: f2.link }];
+      });
+      if (missing.length) return sendForced(env, chatId, missing);
+      await tg(env, 'sendMessage', { chat_id: chatId, text: `🔍 نتائج «${q2}»:`, reply_markup: { inline_keyboard: keyboard } });
       return;
     }
     if (data.startsWith('dl:')) {
@@ -707,7 +792,8 @@ async function handleApi(env, request, path) {
       await logSearch(env, u && u.id ? u.id : 0, q, items.length);
     }
     const counts = q ? await countExt(env, q) : null;
-    return json({ items: items.map(publicFile), hasMore, counts });
+    const suggestions = (q && !items.length) ? await suggestTitles(env, q, 3) : null;
+    return json({ items: items.map(publicFile), hasMore, counts, suggestions });
   }
 
   if (path === '/api/me') {
