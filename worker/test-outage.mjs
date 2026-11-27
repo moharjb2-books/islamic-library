@@ -149,6 +149,26 @@ tgCalls.length = 0;
 await fire({ update_id: 2, message: { message_id: 2, chat: { id: 12345, type: 'private' }, from: { id: 12345, first_name: 'Test' }, text: 'مقدمة ابن خلدون' } });
 const resMsg = tgCalls.find(c => c.method === 'sendMessage' && c.body.reply_markup);
 check('bot search returns snapshot results with D1 dead', Boolean(resMsg && JSON.stringify(resMsg.body.reply_markup).length > 60), JSON.stringify(tgCalls).slice(0, 300));
+{
+  const mk = JSON.stringify((resMsg && resMsg.body.reply_markup) || {});
+  const tx = (resMsg && resMsg.body.text) || '';
+  check('has-results shows external sources inline (aljam3 + archive.org + ketabonline)', mk.includes('hf.co/riyad.pdf') && mk.includes('/download/tafsir-ibn-kathir-01/') && mk.includes('ketabonline.com/ar/books/2422'), mk.slice(0, 300));
+  const lbls = [...mk.matchAll(/"text":"([^"]+)"/g)].map(x => x[1]);
+  check('has-results labels are clean (no underscores / raw extensions)', lbls.length > 0 && lbls.every(l => !/\.(pdf|epub|docx)/i.test(l) && !/\w_\w/.test(l)), JSON.stringify(lbls).slice(0, 300));
+  check('has-results text explains ordering (his channel first)', tx.includes('قناتك أولًا'), tx.slice(0, 200));
+}
+// local duplicate rows collapse to one (largest copy kept)
+{
+  tgCalls.length = 0;
+  await fire({ update_id: 21, message: { message_id: 21, chat: { id: 12345, type: 'private' }, from: { id: 12345, first_name: 'T' }, text: 'فقه' } });
+  await new Promise(r => setTimeout(r, 400));
+  const m2 = tgCalls.find(c => c.method === 'sendMessage' && c.body.reply_markup);
+  const rows = m2 ? JSON.stringify(m2.body.reply_markup) : '';
+  const dlIds = [...rows.matchAll(/"callback_data":"dl:(\d+)"/g)].map(x => x[1]);
+  const labels = [...rows.matchAll(/"text":"📕 ([^"]+)"/g)].map(x => x[1]);
+  const uniq = new Set(labels.map(l => l.replace(/\s*\((PDF|EPUB|DOCX|صوتي)[^)]*\)$/i, '').trim().toLowerCase()));
+  check('local duplicate titles collapse to one row', dlIds.length > 0 && uniq.size === labels.length, `${labels.length} rows, ${uniq.size} unique`);
+}
 
 // 3. delivery callback dl:<id> while D1 is dead -> file sent via snapshot lookup
 const rows = JSON.parse(await readFile(path.join(SNAP_DIR, 'rows', 'c000.json'), 'utf8'));
@@ -164,6 +184,8 @@ if (deliverable) {
 const apiR = await worker.fetch(new Request('http://local/api/search?q=' + encodeURIComponent('فقه')), env, ctx());
 const apiJ = await apiR.json();
 check('api/search works with D1 dead', Array.isArray(apiJ.items) && apiJ.items.length > 0, JSON.stringify(apiJ).slice(0, 200));
+check('api/search has-results carries external sources too', Array.isArray(apiJ.external) && apiJ.external.length > 0 && apiJ.external.some(e2 => e2.src === 'aj'), JSON.stringify(apiJ.external || []).slice(0, 200));
+check('api/search item titles are clean', apiJ.items.every(i2 => !/[_.](pdf|epub|docx)/i.test(i2.file_name || '')), (apiJ.items[0] || {}).file_name || '');
 
 // 5. api/stats falls back to snapshot meta
 const stR = await worker.fetch(new Request('http://local/api/stats'), env, ctx());

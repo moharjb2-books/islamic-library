@@ -766,6 +766,51 @@ async function suggestTitles(env, q, limit = 5) {
   return snapSuggest(q, limit);
 }
 
+// ---------- local result polish: clean titles, dedupe, channel ranking ----------
+function cleanTitle(name) {
+  let s = String(name || '');
+  s = s.replace(/\.(pdf|epub|docx?|txt|mp3|m4a|wav|ogg|zip|rar|7z|mobi|azw3?)$/i, '');
+  s = s.replace(/[_.]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return s;
+}
+function titleKey(name) {
+  return norm(cleanTitle(name)).replace(/\s+/g, ' ').trim();
+}
+// One row per book (largest copy wins), his channel first, clean display titles.
+function polishLocal(items, mainChannel) {
+  const seen = new Map();
+  for (const f of items) {
+    const cleanTitle_ = cleanTitle(f.file_name || f.title);
+    const clean = { ...f, title: cleanTitle_, file_name: cleanTitle_ };
+    const k = titleKey(f.file_name || f.title) || String(f.id);
+    const prev = seen.get(k);
+    if (!prev || (clean.size_bytes || 0) > (prev.size_bytes || 0)) seen.set(k, clean);
+  }
+  const own = [], other = [];
+  for (const f of seen.values()) (f.channel === mainChannel ? own : other).push(f);
+  return own.concat(other);
+}
+function extRows(aj, ext, kbk) {
+  const rows = [];
+  for (const a of aj) {
+    const row = [{ text: `📘 ${a.title}`, url: a.url, style: 'success' }];
+    if (a.alt) row.push({ text: `⬇️ ${a.altKind}`, url: a.alt, style: 'primary' });
+    rows.push(row);
+  }
+  for (const e of ext) rows.push([{ text: `🌐 ${e.title}`, url: e.url, style: 'primary' }]);
+  for (const k of kbk) {
+    const row = [{ text: `📗 ${k.title}`, url: k.url, style: 'primary' }];
+    if (k.pdf) row.push({ text: `⬇️ PDF${k.pdfSize ? ' ' + k.pdfSize + 'MB' : ''}`, url: k.pdf, style: 'success' });
+    rows.push(row);
+  }
+  return rows;
+}
+function extText(aj, ext, kbk) {
+  return (aj.length ? '\n\n📘 من الجامع aljam3.com (تحميل مباشر):' : '')
+    + (ext.length ? '\n\n🌐 من archive.org (تحميل مباشر):' : '')
+    + (kbk.length ? '\n\n📗 من كتاب أونلاين:' : '');
+}
+
 // ---------- fuzzy suggestions ----------
 function editDist(a, b, max) {
   if (Math.abs(a.length - b.length) > max) return max + 1;
@@ -1105,53 +1150,49 @@ async function handleUpdate(env, update, ctx2) {
       if (text.length > 200) text = text.slice(0, 200);
       const perPage = parseInt(settings.per_page, 10) || 10;
       const audioAsked = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(text);
-      const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
-      defer(ctx2, logSearch(env, from.id, text, items.length));
-      if (!items.length) {
-        const [sug, aj, ext, kbk] = await Promise.all([
-          suggestTitles(env, text, 3).catch(() => []),
-          ajSearch(env, text, 3),
-          iaSearch(env, text, 3),
-          kbSearch(env, text, 3),
-        ]);
+      // Local channels and external libraries searched together, in parallel.
+      const [{ items, hasMore }, ajAll, iaAll, kbAll] = await Promise.all([
+        searchFiles(env, text, 'all', 0, perPage, audioAsked),
+        audioAsked ? [] : ajSearch(env, text, 3),
+        audioAsked ? [] : iaSearch(env, text, 3),
+        audioAsked ? [] : kbSearch(env, text, 3),
+      ]);
+      const local = polishLocal(items, env.MAIN_CHANNEL);
+      defer(ctx2, logSearch(env, from.id, text, local.length));
+      const extCap = local.length ? 2 : 3;
+      const aj = (ajAll || []).slice(0, extCap);
+      const ext = (iaAll || []).slice(0, extCap);
+      const kbk = (kbAll || []).slice(0, extCap);
+      if (!local.length) {
+        const sug = await suggestTitles(env, text, 3).catch(() => []);
         const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: `🔎 ${String(g.title).slice(0, 45)}`, callback_data: 'sq:' + g.id, style: 'primary', icon_custom_emoji_id: ICON.search }]);
-        for (const a of aj) {
-          const row = [{ text: `📘 ${a.title}`, url: a.url, style: 'success' }];
-          if (a.alt) row.push({ text: `⬇️ ${a.altKind}`, url: a.alt, style: 'primary' });
-          kb.push(row);
-        }
-        for (const e of ext) kb.push([{ text: `🌐 ${e.title}`, url: e.url, style: 'primary' }]);
-        for (const k of kbk) {
-          const row = [{ text: `📗 ${k.title}`, url: k.url, style: 'primary' }];
-          if (k.pdf) row.push({ text: `⬇️ PDF${k.pdfSize ? ' ' + k.pdfSize + 'MB' : ''}`, url: k.pdf, style: 'success' });
-          kb.push(row);
-        }
+        for (const row of extRows(aj, ext, kbk)) kb.push(row);
         for (const row of extLibRows(text)) kb.push(row);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
           text: `🔍 لم أجد نتائج مطابقة لـ«${text}».`
             + (sug.length ? '\n\nهل تقصد:' : '')
-            + (aj.length ? '\n\n📘 من الجامع aljam3.com (تحميل مباشر):' : '')
-            + (ext.length ? '\n\n🌐 تحميل مباشر من archive.org:' : '')
-            + (kbk.length ? '\n\n📗 من موقع كتاب أونلاين (اقرأ أو حمّل):' : '')
+            + extText(aj, ext, kbk)
             + '\n\n🔗 أو ابحث في مكتبات سنّية موثوقة:'
-            + (!sug.length && !ext.length ? '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.' : ''),
+            + (!sug.length && !aj.length && !ext.length && !kbk.length ? '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.' : ''),
           reply_markup: kb.length ? { inline_keyboard: kb } : undefined,
         });
         return;
       }
-      const keyboard = items.map(f => {
-        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+      const keyboard = local.map(f => {
+        const label = `📕 ${String(f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') {
           return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary', icon_custom_emoji_id: ICON.book }];
         }
         return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
       if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + items.length, style: 'primary', icon_custom_emoji_id: ICON.dl }]);
+      for (const row of extRows(aj, ext, kbk)) keyboard.push(row);
       keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success', icon_custom_emoji_id: ICON.search }]);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
-        text: `🔍 نتائج البحث عن «${text}»${hasMore ? ' — الصفحة الأولى من ' + items.length : ' — ' + items.length}:`,
+        text: `🔍 نتائج البحث عن «${text}» — قناتك أولًا ثم القنوات${hasMore ? ' — الصفحة الأولى من ' + local.length : ' — ' + local.length}:`
+          + extText(aj, ext, kbk),
         reply_markup: { inline_keyboard: keyboard },
       });
       return;
@@ -1480,27 +1521,28 @@ async function handleApi(env, request, path, ctx2) {
     const ext = url.searchParams.get('ext') || 'all';
     const off = parseInt(url.searchParams.get('off') || '0', 10) || 0;
     const perPage = parseInt(settings.per_page, 10) || 10;
-    const { items, hasMore } = await searchFiles(env, q, ext, off, perPage);
+    // Local channels and external libraries searched together, in parallel.
+    const audioOnly = ext === 'audio';
+    const [sr, aj2, ext2, kb2] = await Promise.all([
+      searchFiles(env, q, ext, off, perPage),
+      q && !audioOnly ? ajSearch(env, q, 3).catch(() => []) : Promise.resolve([]),
+      q && !audioOnly ? iaSearch(env, q, 3).catch(() => []) : Promise.resolve([]),
+      q && !audioOnly ? kbSearch(env, q, 3).catch(() => []) : Promise.resolve([]),
+    ]);
+    const { items, hasMore } = sr;
+    const local = polishLocal(items, env.MAIN_CHANNEL);
     if (q) {
       const u = await apiUser(env, request).catch(() => null);
-      defer(ctx2, logSearch(env, u && u.id ? u.id : 0, q, items.length));
+      defer(ctx2, logSearch(env, u && u.id ? u.id : 0, q, local.length));
     }
     const counts = q ? await countExt(env, q) : null;
     let suggestions = null;
-    let external = null;
-    if (q && !items.length) {
-      const [sug2, aj2, ext2, kb2] = await Promise.all([
-        suggestTitles(env, q, 3).catch(() => []),
-        ajSearch(env, q, 3).catch(() => []),
-        iaSearch(env, q, 3).catch(() => []),
-        kbSearch(env, q, 3).catch(() => []),
-      ]);
-      suggestions = sug2;
-      external = (aj2 || []).map(a2 => ({ title: a2.title, url: a2.url, src: 'aj' }))
-        .concat((ext2 || []).map(e2 => ({ ...e2, src: 'ia' })))
-        .concat((kb2 || []).map(k2 => ({ title: k2.title, url: k2.pdf || k2.url, src: 'kb' })));
-    }
-    return json({ items: items.map(publicFile), hasMore, counts, suggestions, external });
+    if (q && !local.length) { try { suggestions = await suggestTitles(env, q, 3); } catch (e) {} }
+    const cap = local.length ? 2 : 3;
+    const external = (aj2 || []).slice(0, cap).map(a2 => ({ title: a2.title, url: a2.url, src: 'aj' }))
+      .concat((ext2 || []).slice(0, cap).map(e2 => ({ ...e2, src: 'ia' })))
+      .concat((kb2 || []).slice(0, cap).map(k2 => ({ title: k2.title, url: k2.pdf || k2.url, src: 'kb' })));
+    return json({ items: local.map(publicFile), hasMore, counts, suggestions, external });
   }
 
   if (path === '/api/me') {

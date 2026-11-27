@@ -289,7 +289,7 @@ function cardHtml(f) {
     <button class="fav" onclick="toggleFav(${f.id})">${isFav ? '★' : '☆'}</button>
     <div class="info">
       <h3>${esc(f.title)}</h3>
-      <div class="fname">${esc(f.file_name || f.title)}</div>
+      ${f.channel ? `<div class="fname">@${esc(f.channel)}</div>` : ''}
       <div class="fsize">${esc(f.size)}${f.is_audio ? ' <span class="audiolabel">🎧 صوتي</span>' : ''}</div>
       ${f.author ? `<div class="author">${esc(f.author)}</div>` : ''}
       <div class="tags">
@@ -432,6 +432,23 @@ function extLinksHtml(q) {
 }
 window.openExtLib = function(u) { if (tg && tg.openLink) tg.openLink(u); else window.open(u, '_blank'); };
 
+function extSectionsHtml() {
+  const ext = state.external || [];
+  if (!ext.length) return '';
+  const extBtn = (e2, ic) => `<button onclick="openExtLib('${String(e2.url).replace(/'/g, '%27')}')">${ic} ${String(e2.title).replace(/</g, '&lt;')}</button>`;
+  let h = '';
+  if (ext.some(e2 => e2.src === 'aj'))
+    h += `<div class="sug"><div class="sug-lbl">📘 من الجامع aljam3.com (تحميل مباشر):</div>`
+      + ext.filter(e2 => e2.src === 'aj').map(e2 => extBtn(e2, '📘')).join('') + `</div>`;
+  if (ext.some(e2 => e2.src === 'ia'))
+    h += `<div class="sug"><div class="sug-lbl">🌐 تحميل مباشر من archive.org:</div>`
+      + ext.filter(e2 => e2.src === 'ia').map(e2 => extBtn(e2, '⬇️')).join('') + `</div>`;
+  if (ext.some(e2 => e2.src === 'kb'))
+    h += `<div class="sug"><div class="sug-lbl">📗 من موقع كتاب أونلاين:</div>`
+      + ext.filter(e2 => e2.src === 'kb').map(e2 => extBtn(e2, '📗')).join('') + `</div>`;
+  return h;
+}
+
 function resultsHtml() {
   if (state.loading) return `<div class="spin">جارٍ البحث...</div>`;
   if (!state.items.length) {
@@ -443,23 +460,14 @@ function resultsHtml() {
         ${state.suggestions.map((g, i) => `<button onclick="pickSug(${i})">🔎 ${g.title.replace(/</g, '&lt;')}</button>`).join('')}
         </div>`
       : '<br>جرّب اسمًا أقصر أو جزءًا منه.';
-    const ext = state.external || [];
-    const extBtn = (e2, ic) => `<button onclick="openExtLib('${String(e2.url).replace(/'/g, '%27')}')">${ic} ${String(e2.title).replace(/</g, '&lt;')}</button>`;
-    const ajHtml = ext.some(e2 => e2.src === 'aj')
-      ? `<div class="sug"><div class="sug-lbl">📘 من الجامع aljam3.com (تحميل مباشر):</div>`
-        + ext.filter(e2 => e2.src === 'aj').map(e2 => extBtn(e2, '📘')).join('') + `</div>` : '';
-    const iaHtml = ext.some(e2 => e2.src === 'ia')
-      ? `<div class="sug"><div class="sug-lbl">🌐 تحميل مباشر من archive.org:</div>`
-        + ext.filter(e2 => e2.src === 'ia').map(e2 => extBtn(e2, '⬇️')).join('') + `</div>` : '';
-    const kbHtml = ext.some(e2 => e2.src === 'kb')
-      ? `<div class="sug"><div class="sug-lbl">📗 من موقع كتاب أونلاين:</div>`
-        + ext.filter(e2 => e2.src === 'kb').map(e2 => extBtn(e2, '📗')).join('') + `</div>` : '';
-    return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.` + sugHtml + ajHtml + iaHtml + kbHtml + extLinksHtml(state.q) + `</div>`;
+    return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.` + sugHtml + extSectionsHtml() + extLinksHtml(state.q) + `</div>`;
   }
   const head = state.q ? `<div class="sec-head"><h2>نتائج البحث</h2></div>`
     : (state.tab === 'search' ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '');
   let h = head + `<div class="list">${state.items.map(cardHtml).join('')}</div>`;
   if (state.hasMore) h += `<button class="more-btn" id="moreBtn" onclick="loadMore()">${state.loadingMore ? 'جارٍ التحميل...' : 'عرض المزيد ⬇ (' + (state.items.length) + ' معروضة)'}</button>`;
+  // External libraries shown inline under the channel results.
+  if (state.q) h += extSectionsHtml();
   return h;
 }
 
