@@ -47,7 +47,9 @@ const iaServer = http.createServer((req, res) => {
     if (id === 'tafsir-ibn-kathir-01') return res.end(JSON.stringify({ files: [{ name: 'tafsir_text.pdf', size: '12000000' }] }));
     return res.end(JSON.stringify({ files: [] }));
   }
-  res.end(JSON.stringify({ response: { numFound: 2, docs: [
+  res.end(JSON.stringify({ response: { numFound: 4, docs: [
+    { identifier: 'bulk-pack-99', title: 'كتب صيغة ورد وورد 6538 كتاب من المكتبة الشاملة', creator: null },
+    { identifier: 'shia-book-98', title: 'بحار الأنوار', creator: 'المجلسي' },
     { identifier: 'tafsir-ibn-kathir-01', title: 'تفسير ابن كثير ط العلمية', creator: 'ابن كثير' },
     { identifier: 'another-book-02', title: 'كتاب آخر', creator: null },
   ] } }));
@@ -63,6 +65,7 @@ const kbServer = http.createServer((req, res) => {
                pdf: { url: 'https://s2.ketabonline.com/books/2422/2422.pdf.zip', size: 4965008 } } },
     { id: 6572, lang: 'ar', is_free: 1, title: 'كتاب بلا ملف', authors: [], files: { data: { url: 'x' }, pdf: null } },
     { id: 9999, lang: 'ar', is_free: 0, title: 'كتاب مدفوع يجب استبعاده', authors: [], files: { pdf: null } },
+    { id: 7777, lang: 'ar', is_free: 1, title: 'غريب القرآن', authors: [{ name: 'زيد بن علي' }], files: { pdf: { url: 'https://s2.ketabonline.com/books/7777/7777.pdf.zip', size: 1000 } } },
     { id: 8888, lang: 'en', is_free: 1, title: 'English book must be excluded', authors: [], files: { pdf: null } },
   ] }));
 });
@@ -75,8 +78,16 @@ const ajServer = http.createServer((req, res) => {
   if (u.pathname === '/api/v1/books') {
     return res.end(JSON.stringify({ books: [
       { id: 101, title: '<mark>رياض&nbsp;</mark>الصالحين - النووي', author: { id: 1, name: 'النووي' }, library: { id: 3, name: 'المكتبة الشاملة الوقفية' } },
+      { id: 103, title: 'رياض الصالحين - طبعة أخرى', author: { id: 1, name: 'النووي' }, library: { id: 3, name: 'الوقفية' } },
+      { id: 104, title: 'الكافي', author: { id: 9, name: 'الكليني' }, library: { id: 3, name: 'الوقفية' } },
       { id: 102, title: 'كتاب بلا ملفات', author: { id: 2, name: 'مؤلف' }, library: { id: 3, name: 'الوقفية' } },
     ] }));
+  }
+  if (u.pathname === '/api/v1/books/103') {
+    return res.end(JSON.stringify({ files: [{ id: 2, urls: { pdf: 'https://hf.co/riyad.pdf' } }] }));
+  }
+  if (u.pathname === '/api/v1/books/104') {
+    return res.end(JSON.stringify({ files: [{ id: 3, urls: { pdf: 'https://hf.co/kafi.pdf' } }] }));
   }
   if (u.pathname === '/api/v1/books/101') {
     return res.end(JSON.stringify({ files: [{ id: 1, urls: { pdf: 'https://hf.co/riyad.pdf', docx: 'https://hf.co/riyad.docx' } }] }));
@@ -300,6 +311,7 @@ for (const [p, b] of [
   check('not-found offers Sunni external-library search links', mk.includes('shamela.ws/search?q=') && mk.includes('waqfeya.net/search?q=') && mk.includes('dorar.net/site/search?skeys=') && mk.includes('islamhouse.com/ar/search/'), mk.slice(0, 300));
   check('not-found offers ketabonline reader + direct PDF, free+Arabic only, tags stripped', mk.includes('ketabonline.com/ar/books/2422') && mk.includes('2422.pdf.zip') && mk.includes('ketabonline.com/ar/books/6572') && !mk.includes('9999') && !mk.includes('8888') && !mk.includes('<em>') && mk.includes('سامي محمد'), mk.slice(0, 400));
   check('not-found offers aljam3 first with direct PDF + DOCX, tags stripped, empty-file book dropped', mk.includes('hf.co/riyad.pdf') && mk.includes('hf.co/riyad.docx') && !mk.includes('<mark>') && !mk.includes('بلا ملفات') && (m.body.text || '').indexOf('الجامع') > -1 && (m.body.text || '').indexOf('الجامع') < (m.body.text || '').indexOf('archive.org'), JSON.stringify(m && m.body).slice(0, 400));
+  check('external sources filter non-Sunni + IA bulk packs + dedupe editions', !mk.includes('الكليني') && !mk.includes('زيد بن علي') && !mk.includes('7777') && !mk.includes('bulk-pack-99') && !mk.includes('shia-book-98') && mk.split('hf.co/riyad.pdf').length === 2 && !mk.includes('kafi.pdf'), mk.slice(0, 500));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

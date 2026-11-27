@@ -463,14 +463,17 @@ async function iaSearch(env, q, limit = 3) {
   u.searchParams.set('q', `(${q}) AND mediatype:texts`);
   for (const f of ['identifier', 'title', 'creator']) u.searchParams.append('fl[]', f);
   u.searchParams.set('sort[]', 'downloads desc');
-  u.searchParams.set('rows', String(limit));
+  u.searchParams.set('rows', '10');
   u.searchParams.set('output', 'json');
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 2000);
   try {
     const r = await fetch(u.toString(), { signal: ctrl.signal, headers: { 'user-agent': 'IslamicLibraryBot/1.0 (+https://t.me/ISLAMIC_BOOKS_LIBbot)' } });
     const j = await r.json();
-    const docs = ((j.response && j.response.docs) || []).slice(0, limit).filter(d => d && d.identifier);
+    const docs = ((j.response && j.response.docs) || [])
+      .filter(d => d && d.identifier)
+      .filter(d => sunniOk(d.title, d.creator) && !IA_BULK_RE.test(String(d.title || '')))
+      .slice(0, limit);
     // Resolve a direct PDF/EPUB per item so the button downloads the book
     // itself, like a channel result, instead of opening a search page.
     const items = await Promise.all(docs.map(async (d) => {
@@ -503,6 +506,12 @@ async function iaSearch(env, q, limit = 3) {
   } catch (e) { return []; } finally { clearTimeout(t); }
 }
 
+// Non-Sunni markers: external corpora are broad; drop obvious off-manhaj hits.
+const NON_SUNNI_RE = /(الشيع|الإمامية|الزيدية|الخميني|الكليني|المجلسي|الطوسي|الطباطبائي|زيد بن علي|الحر العاملي|الإسماعيلي|البهائية|القاديانية|الأحمدية|النصيرية|الدرزية|بابي)/;
+function sunniOk(...fields) { return !NON_SUNNI_RE.test(fields.filter(Boolean).join(' ')); }
+// IA bulk packs (whole-library zips) are noise for a single-book query.
+const IA_BULK_RE = /(6538|صيغة (ورد|ويب)|كتاب إسلامي كل ألف|6 ألف|HTM WEB|shamelah library|موسوعة الكتب)/i;
+
 // aljam3.com (الجامع): free open API, ~63k Sunni-curated books. Search has no
 // files; a bounded detail call per hit resolves direct PDF/DOCX/TXT links.
 const ajCache = new Map();
@@ -522,10 +531,13 @@ async function ajSearch(env, q, limit = 3) {
     u.searchParams.set('limit', String(limit));
     const r = await fetch(u.toString(), { signal: ctrl.signal, headers: ua });
     const j = await r.json();
-    const books = ((j && j.books) || []).slice(0, limit).filter(b => b && b.id);
+    // Fetch a couple extra: same book in several editions ranks as separate hits.
+    const books = ((j && j.books) || []).slice(0, limit + 2).filter(b => b && b.id);
     const items = await Promise.all(books.map(async (b) => {
       const author = strip(b.author && b.author.name);
-      const title = strip(b.title).slice(0, 24) + (author ? ' · ' + author.slice(0, 12) : '');
+      const rawTitle = strip(b.title);
+      if (!sunniOk(rawTitle, author)) return null;
+      const title = rawTitle.slice(0, 30) + (author ? ' · ' + author.slice(0, 12) : '');
       let pdf = null, alt = null, altKind = '';
       try {
         const c2 = new AbortController();
@@ -544,7 +556,14 @@ async function ajSearch(env, q, limit = 3) {
       if (!pdf && !alt) return null;
       return { title, url: pdf || alt, alt: pdf ? alt : null, altKind, lib: strip(b.library && b.library.name) };
     }));
-    const out = items.filter(Boolean);
+    // Dedupe editions: same direct file or same label keeps only its first hit.
+    const seen = new Set();
+    const out = items.filter(Boolean).filter(i => {
+      const k1 = 'u:' + i.url, k2 = 't:' + i.title;
+      if (seen.has(k1) || seen.has(k2)) return false;
+      seen.add(k1); seen.add(k2);
+      return true;
+    }).slice(0, limit);
     ajCache.set(key, { at: Date.now(), items: out });
     if (ajCache.size > 500) ajCache.clear();
     return out;
@@ -570,6 +589,7 @@ async function kbSearch(env, q, limit = 3) {
     const strip = (s) => String(s || '').replace(/<[^>]+>/g, '').trim();
     const items = ((j && j.data) || [])
       .filter(b => b && b.id && b.lang === 'ar' && (b.is_free === 1 || b.is_free === true))
+      .filter(b => sunniOk(strip(b.title), (b.authors || []).map(a => strip(a.name)).join(' '), (b.categories || []).map(c => strip(c.name)).join(' ')))
       .slice(0, limit)
       .map(b => {
         const author = (b.authors || []).map(a => strip(a.name)).filter(Boolean).join('، ');
