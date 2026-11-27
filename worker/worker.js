@@ -1113,7 +1113,7 @@ async function sendWelcome(env, settings, chatId) {
   const keyboard = [
     [{ text: '🔍 فتح صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success' }],
     [
-      { text: '📚 أحدث الإضافات', callback_data: 'latest', style: 'primary' },
+      { text: '🆕 أحدث الإضافات', callback_data: 'latest', style: 'primary' },
       { text: '⭐ المفضلة', callback_data: 'favs', style: 'primary' },
     ],
     lastRow,
