@@ -105,5 +105,31 @@ const stR = await worker.fetch(new Request('http://local/api/stats'), env, ctx()
 const stJ = await stR.json();
 check('api/stats falls back to snapshot meta', stJ.files > 50000 && stJ.snapshot === true, JSON.stringify(stJ));
 
+// 6. typo search while D1 is dead -> "هل تقصد" with suggestion buttons
+tgCalls.length = 0;
+await fire({ update_id: 6, message: { message_id: 6, chat: { id: 12345, type: 'private' }, from: { id: 12345, first_name: 'T' }, text: 'مقمدة ابن خلدونن' } });
+const sugMsg = tgCalls.find(c => c.method === 'sendMessage');
+check('typo search gets did-you-mean with buttons (D1 dead)', Boolean(sugMsg && /هل تقصد/.test(sugMsg.body.text) && sugMsg.body.reply_markup && sugMsg.body.reply_markup.inline_keyboard.length > 0), JSON.stringify(tgCalls).slice(0, 300));
+
+// 7. gibberish search while D1 is dead -> clear not-found, never silent
+tgCalls.length = 0;
+await fire({ update_id: 7, message: { message_id: 7, chat: { id: 12345, type: 'private' }, from: { id: 12345, first_name: 'T' }, text: 'خخخخخخخقققق' } });
+const nfMsg = tgCalls.find(c => c.method === 'sendMessage');
+check('gibberish search still gets a reply (D1 dead)', Boolean(nfMsg && /لم أجد/.test(nfMsg.body.text)), JSON.stringify(tgCalls).slice(0, 300));
+
+// 8. sq: suggestion-pick callback while D1 is dead -> results via snapshot
+const typoSug = sugMsg && sugMsg.body.reply_markup.inline_keyboard[0][0].callback_data;
+if (typoSug) {
+  tgCalls.length = 0;
+  await fire({ update_id: 8, callback_query: { id: 'cb8', from: { id: 12345 }, message: { chat: { id: 12345, type: 'private' } }, data: typoSug } });
+  const sqRes = tgCalls.find(c => c.method === 'sendMessage' && c.body.reply_markup);
+  check('sq: suggestion pick returns results (D1 dead)', Boolean(sqRes), JSON.stringify(tgCalls).slice(0, 300));
+}
+
+// 9. API typo search -> suggestions carry {id, title}
+const sR = await worker.fetch(new Request('http://local/api/search?q=' + encodeURIComponent('مقمدة ابن خلدونن')), env, ctx());
+const sJ = await sR.json();
+check('api suggestions are {id,title} rows', Array.isArray(sJ.suggestions) && sJ.suggestions.length > 0 && Boolean(sJ.suggestions[0].id && sJ.suggestions[0].title), JSON.stringify(sJ.suggestions).slice(0, 200));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

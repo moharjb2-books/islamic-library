@@ -312,8 +312,28 @@ async function snapSuggest(q, limit) {
     scored.push([editDist(mainW, k, 3), k]);
   }
   scored.sort((a, b) => a[0] - b[0] || a[1].length - b[1].length);
+  // Resolve the closest tokens to real book rows so callers get {id, title},
+  // the same shape the DB suggester returns.
   const out = [];
-  for (const s of scored) { if (s[0] > 2) break; out.push(s[1]); if (out.length >= limit) break; }
+  const seenT = new Set();
+  const chunks = {};
+  for (const s of scored) {
+    if (s[0] > 2 || out.length >= limit) break;
+    const posts = shard[s[1]];
+    if (!posts || !posts.length) continue;
+    const g = posts[posts.length - 1];
+    const ci = Math.floor(g / 500);
+    if (!chunks[ci]) {
+      try { chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json'); }
+      catch (e) { continue; }
+    }
+    const r = chunks[ci][g % 500];
+    if (!r) continue;
+    const title = String(r[1] || '').trim();
+    if (!title || seenT.has(title)) continue;
+    seenT.add(title);
+    out.push({ id: r[0], title });
+  }
   return out;
 }
 async function getFileById(env, id) {
@@ -929,7 +949,7 @@ async function handleUpdate(env, update, ctx2) {
       if (!items.length) {
         let sug = [];
         try { sug = await suggestTitles(env, text, 3); } catch (e) {}
-        const kb = sug.map(g => [{ text: `🔎 ${g.title.slice(0, 45)}`, callback_data: 'sq:' + g.id }]);
+        const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: `🔎 ${String(g.title).slice(0, 45)}`, callback_data: 'sq:' + g.id }]);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
           text: `🔍 لم أجد نتائج مطابقة لـ«${text}».` + (sug.length ? '\n\nهل تقصد:' : '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.'),
@@ -1073,7 +1093,7 @@ async function handleUpdate(env, update, ctx2) {
     }
     if (data.startsWith('sq:')) {
       const id = parseInt(data.slice(3), 10);
-      const f = await env.DB.prepare('SELECT title FROM files WHERE id = ?').bind(id).first();
+      const f = await getFileById(env, id);
       await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
       if (!f) return;
       const q2 = f.title.split(/\s+/).slice(0, 5).join(' ');
@@ -1081,7 +1101,7 @@ async function handleUpdate(env, update, ctx2) {
       const { items } = await searchFiles(env, q2, 'all', 0, perPage2);
       defer(ctx2, logSearch(env, cb.from.id, q2, items.length));
       if (!items.length) {
-        await tg(env, 'sendMessage', { chat_id: chatId, text: `🔍 لم أجد نتائج مطابقة لـ«${q2}».` });
+        await tg(env, 'sendMessage', { chat_id: chatId, text: `🔍 لم أجد نتائج مطابقة لـ«${q2}».\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.` });
         return;
       }
       const keyboard = items.map(f2 => {
