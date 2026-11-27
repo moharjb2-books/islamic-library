@@ -89,6 +89,7 @@ const SCHEMA = [
 ];
 
 let migrated = false;
+let migrateFailAt = 0;
 async function reindexNormV2(env) {
   const v = await env.DB.prepare("SELECT value FROM settings WHERE key = 'norm_v'").first();
   if (v && v.value === '2') return;
@@ -118,14 +119,24 @@ async function reindexNormV2(env) {
 
 async function migrate(env) {
   if (migrated) return;
-  for (const stmt of SCHEMA) await env.DB.prepare(stmt).run();
-  try { await env.DB.prepare('ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0').run(); } catch (e) {}
-  try { await env.DB.prepare("ALTER TABLE files ADD COLUMN file_name TEXT DEFAULT ''").run(); } catch (e) {}
-  try { await env.DB.prepare('ALTER TABLE channels ADD COLUMN backfill_cursor INTEGER DEFAULT 0').run(); } catch (e) {}
-  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS export_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, channel TEXT NOT NULL, status TEXT DEFAULT 'pending', note TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), done_at TEXT DEFAULT '')").run(); } catch (e) {}
+  // After a failed attempt (DB capped/slow), back off a minute instead of
+  // paying a hanging DDL round-trip on every request.
+  if (Date.now() - migrateFailAt < 60000) return;
+  try {
+    await withTimeout((async () => {
+      for (const stmt of SCHEMA) await env.DB.prepare(stmt).run();
+      try { await env.DB.prepare('ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0').run(); } catch (e) {}
+      try { await env.DB.prepare("ALTER TABLE files ADD COLUMN file_name TEXT DEFAULT ''").run(); } catch (e) {}
+      try { await env.DB.prepare('ALTER TABLE channels ADD COLUMN backfill_cursor INTEGER DEFAULT 0').run(); } catch (e) {}
+      try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS export_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, channel TEXT NOT NULL, status TEXT DEFAULT 'pending', note TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), done_at TEXT DEFAULT '')").run(); } catch (e) {}
+    })(), 4000);
+  } catch (e) {
+    migrateFailAt = Date.now();
+    throw e;
+  }
   migrated = true;
-  try { await reindexNormV2(env); } catch (e) { migrated = false; }
-  try { await backfillFts(env); } catch (e) {}
+  try { await withTimeout(reindexNormV2(env), 4000); } catch (e) { migrated = false; migrateFailAt = Date.now(); }
+  try { await withTimeout(backfillFts(env), 4000); } catch (e) {}
 }
 
 let ftsOk = false;
@@ -171,6 +182,7 @@ const DEFAULTS = {
   admin_ids: '',
 };
 let settingsCache = { at: 0, s: null };
+let overviewCache = { at: 0, s: null };
 async function getSettings(env) {
   if (settingsCache.s && Date.now() - settingsCache.at < 300000) return settingsCache.s;
   if (snapOn && !snapMaybeProbe()) return settingsCache.s || { ...DEFAULTS };
@@ -454,7 +466,7 @@ async function iaSearch(env, q, limit = 3) {
   u.searchParams.set('rows', String(limit));
   u.searchParams.set('output', 'json');
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 3000);
+  const t = setTimeout(() => ctrl.abort(), 2000);
   try {
     const r = await fetch(u.toString(), { signal: ctrl.signal, headers: { 'user-agent': 'IslamicLibraryBot/1.0 (+https://t.me/ISLAMIC_BOOKS_LIBbot)' } });
     const j = await r.json();
@@ -1379,43 +1391,61 @@ async function handleApi(env, request, path, ctx2) {
     if (!(await isAdmin(env, settings, user.id))) return json({ error: 'forbidden' }, 403);
 
     if (path === '/api/admin/overview') {
-      try {
-      const files = await env.DB.prepare('SELECT COUNT(*) AS c FROM files').first();
-      const users = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first();
-      const usersToday = await env.DB.prepare(
-        "SELECT COUNT(*) AS c FROM users WHERE first_seen >= unixepoch('now','start of day')").first();
-      const activeToday = await env.DB.prepare(
-        "SELECT COUNT(*) AS c FROM users WHERE last_seen >= unixepoch('now','start of day')").first();
-      const searchesTotal = await env.DB.prepare('SELECT COUNT(*) AS c FROM searches').first();
-      const searchesToday = await env.DB.prepare(
-        "SELECT COUNT(*) AS c FROM searches WHERE created_at >= unixepoch('now','start of day')").first();
-      const noResult = await env.DB.prepare('SELECT COUNT(*) AS c FROM searches WHERE results = 0').first();
-      const chans = await env.DB.prepare('SELECT * FROM channels ORDER BY added_at DESC').all();
-      const forced = await env.DB.prepare('SELECT * FROM forced_channels ORDER BY username').all();
-      return json({
-        files: files.c || 0, users: users.c || 0,
-        users_today: usersToday.c || 0, active_today: activeToday.c || 0,
-        searches_total: searchesTotal.c || 0, searches_today: searchesToday.c || 0,
-        searches_no_result: noResult.c || 0,
-        channels: chans.results || [], forced: forced.results || [], settings,
-      });
-      } catch (e) {
-        snapNote();
+      const now = Date.now();
+      if (overviewCache.s && now - overviewCache.at < 60000) return json(overviewCache.s);
+      const overviewFallback = async () => {
         // D1 down: answer from the snapshot + gate fallback chain, flag it.
         let meta = {};
         try { meta = await snapMeta(); } catch (e2) {}
         let forcedNames = [];
         try { forcedNames = await forcedList(env); } catch (e2) {}
-        return json({
+        return {
           files: meta.files || 0, users: 0, users_today: 0, active_today: 0,
           searches_total: 0, searches_today: 0, searches_no_result: 0,
           channels: [], forced: forcedNames.map(u => ({ username: u, active: 1 })),
           settings, db_down: true, notice: ADMIN_DB_NOTICE,
-        });
+        };
+      };
+      if (snapOn && !snapMaybeProbe()) {
+        const p = await overviewFallback();
+        overviewCache = { at: now, s: p };
+        return json(p);
+      }
+      try {
+        // One parallel bounded batch: 9 sequential unbounded COUNTs used to
+        // take seconds each on a slow or capped DB.
+        const one = (sql) => withTimeout(env.DB.prepare(sql).first(), 1500);
+        const [files, users, usersToday, activeToday, searchesTotal, searchesToday, noResult, chans, forced] = await Promise.all([
+          one('SELECT COUNT(*) AS c FROM files'),
+          one('SELECT COUNT(*) AS c FROM users'),
+          one("SELECT COUNT(*) AS c FROM users WHERE first_seen >= unixepoch('now','start of day')"),
+          one("SELECT COUNT(*) AS c FROM users WHERE last_seen >= unixepoch('now','start of day')"),
+          one('SELECT COUNT(*) AS c FROM searches'),
+          one("SELECT COUNT(*) AS c FROM searches WHERE created_at >= unixepoch('now','start of day')"),
+          one('SELECT COUNT(*) AS c FROM searches WHERE results = 0'),
+          withTimeout(env.DB.prepare('SELECT * FROM channels ORDER BY added_at DESC').all(), 1500),
+          withTimeout(env.DB.prepare('SELECT * FROM forced_channels ORDER BY username').all(), 1500),
+        ]);
+        const p = {
+          files: files.c || 0, users: users.c || 0,
+          users_today: usersToday.c || 0, active_today: activeToday.c || 0,
+          searches_total: searchesTotal.c || 0, searches_today: searchesToday.c || 0,
+          searches_no_result: noResult.c || 0,
+          channels: chans.results || [], forced: forced.results || [], settings,
+        };
+        snapRecovered();
+        overviewCache = { at: now, s: p };
+        return json(p);
+      } catch (e) {
+        snapNote();
+        const p = await overviewFallback();
+        overviewCache = { at: now, s: p };
+        return json(p);
       }
     }
 
     if (path === '/api/admin/users') {
+      if (snapOn && !snapMaybeProbe()) return json({ users: [], db_down: true, notice: ADMIN_DB_NOTICE });
       try {
         const rows = await env.DB.prepare(
           'SELECT user_id, first_name, username, is_admin, blocked, first_seen, last_seen FROM users ORDER BY last_seen DESC LIMIT 100'
@@ -1426,6 +1456,7 @@ async function handleApi(env, request, path, ctx2) {
 
     if (path === '/api/admin/searches') {
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 300);
+      if (snapOn && !snapMaybeProbe()) return json({ searches: [], db_down: true, notice: ADMIN_DB_NOTICE });
       try {
         const rows = await env.DB.prepare(
           'SELECT user_id, q, results, created_at FROM searches ORDER BY id DESC LIMIT ?'
@@ -1486,6 +1517,7 @@ async function handleApi(env, request, path, ctx2) {
     // ---- owner only: manage admins ----
     if (path === '/api/admin/admins') {
       if (!isOwner(env, user.id)) return json({ error: 'owner only' }, 403);
+      if (snapOn && !snapMaybeProbe()) return json({ admins: [], owner_id: env.OWNER_ID || '', db_down: true, notice: ADMIN_DB_NOTICE });
       try {
         const rows = await env.DB.prepare(
           "SELECT user_id, first_name, username, first_seen FROM users WHERE is_admin = 1 ORDER BY first_seen"
@@ -1552,6 +1584,7 @@ async function handleApi(env, request, path, ctx2) {
     }
 
     if (path === '/api/admin/broadcasts') {
+      if (snapOn && !snapMaybeProbe()) return json({ broadcasts: [], db_down: true, notice: ADMIN_DB_NOTICE });
       try {
         const rows = await env.DB.prepare(
           'SELECT id, kind, text, status, sent, failed, blocked, created_at FROM broadcasts ORDER BY id DESC LIMIT 10'
@@ -1638,12 +1671,14 @@ export default {
   async scheduled(event, env, ctx) {
     try {
       await migrate(env);
-      const rows = await env.DB.prepare(
-        "SELECT id FROM broadcasts WHERE status IN ('pending','sending') ORDER BY id LIMIT 3"
-      ).all();
-      for (const r of rows.results || []) ctx.waitUntil(runBroadcastChunk(env, r.id));
-      if (new Date().getUTCMinutes() % 30 === 0) ctx.waitUntil(recheckMemberships(env));
-    } catch (e) { console.error('scheduled failed:', (e && e.stack) || e); }
+      if (!snapOn) {
+        const rows = await withTimeout(env.DB.prepare(
+          "SELECT id FROM broadcasts WHERE status IN ('pending','sending') ORDER BY id LIMIT 3"
+        ).all(), 3000);
+        for (const r of rows.results || []) ctx.waitUntil(runBroadcastChunk(env, r.id));
+        if (new Date().getUTCMinutes() % 30 === 0) ctx.waitUntil(recheckMemberships(env));
+      }
+    } catch (e) { snapNote(); console.error('scheduled failed:', (e && e.stack) || e); }
   },
 
   async fetch(request, env, ctx) {
@@ -1657,7 +1692,8 @@ export default {
 
 async function handleFetch(request, env, ctx) {
     if (env.SNAPSHOT_BASE) SNAP_BASE = env.SNAPSHOT_BASE;
-    try { await migrate(env); } catch (e) { snapNote(); }
+    // Migrate off the reply path: never block a webhook ack or an API answer on DDL.
+    defer(ctx, migrate(env).then(() => {}, (e) => { snapNote(); }));
     const url = new URL(request.url);
     const path = url.pathname;
 

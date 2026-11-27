@@ -522,15 +522,17 @@ async function loadAdmin() {
   if (r.error) { app.innerHTML = `<div class="empty"><span class="big">⚠️</span>${esc(r.message || r.error)}</div>`; return; }
   if (r.error) { app.innerHTML = `<div class="empty"><span class="big">🔒</span>هذه المنطقة للمشرف فقط.</div>` + navHtml(); state.isAdminView = false; return; }
   state.admin = r;
-  if (state.me && state.me.is_owner) {
-    const a = await api('/api/admin/admins');
+  // Load the secondary panels in parallel: sequential round trips made the
+  // panel take several seconds on mobile.
+  const jobs = [api('/api/admin/searches?limit=60'), api('/api/admin/users')];
+  if (state.me && state.me.is_owner) jobs.push(api('/api/admin/admins'));
+  const [sr, ur, a] = await Promise.all(jobs);
+  state.admin.searches = (sr && sr.searches) || [];
+  state.admin.usersList = (ur && ur.users) || [];
+  if (a && !a.error) {
     state.admin.admins = a.admins || [];
     state.admin.owner_id = a.owner_id || '';
   }
-  const sr = await api('/api/admin/searches?limit=60');
-  state.admin.searches = sr.searches || [];
-  const ur = await api('/api/admin/users');
-  state.admin.usersList = ur.users || [];
   renderAdmin();
 }
 
