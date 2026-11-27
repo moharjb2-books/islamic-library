@@ -1250,6 +1250,15 @@ export default {
   },
 
   async fetch(request, env, ctx) {
+    try {
+      return await handleFetch(request, env, ctx);
+    } catch (e) {
+      return json({ error: 'internal', detail: String((e && e.stack) || e).slice(0, 400) }, 500);
+    }
+  },
+});
+
+async function handleFetch(request, env, ctx) {
     await migrate(env);
     const url = new URL(request.url);
     const path = url.pathname;
@@ -1269,5 +1278,4 @@ export default {
     if (path.startsWith('/api/')) return handleApi(env, request, path);
 
     return json({ error: 'not found' }, 404, false);
-  },
-};
+}
