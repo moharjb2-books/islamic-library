@@ -229,7 +229,7 @@ function rankScored(rows, limit, seenT) {
   for (const r of rows) {
     const pt = r.pretty;
     if (!pt) continue;
-    const key = pt.replace(/[\d٠-٩]+\s*$/, '').trim();
+    const key = pt.replace(/[\d٠-٩]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (seenT.has(key)) continue;
     seenT.add(key);
     out.push({ id: r.id, title: pt });
