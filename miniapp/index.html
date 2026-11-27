@@ -23,12 +23,6 @@
   --tag-ink: #8a6b1f;
   /* =============================================================== */
   --cream: #f4eee1;
-  /* ===== animated background palette (swap with the theme) ===== */
-  --bg-tint: #eee4cb;
-  --glow-1: rgba(201, 162, 39, .16);  /* gold */
-  --glow-2: rgba(29, 42, 77, .10);    /* navy */
-  --glow-3: rgba(201, 162, 39, .09);  /* soft gold */
-  /* ============================================================ */
   --card: #fffdf7;
   --ink: #2b2620;
   --muted: #8a7f6f;
@@ -36,10 +30,9 @@
 }
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { overflow-x: hidden; max-width: 100vw; }
-html { background: var(--cream); }
 body {
   font-family: 'Thmanyah Sans', system-ui, sans-serif;
-  background: transparent;
+  background: var(--cream);
   color: var(--ink);
   min-height: 100vh;
   padding-bottom: 76px;
@@ -138,33 +131,6 @@ h1, h2, h3, .serif { font-family: 'Thmanyah Serif', serif; }
 .more-btn { display: block; width: calc(100% - 32px); margin: 10px 16px 18px; padding: 12px; border-radius: 12px; border: 1.5px solid var(--brand); background: var(--brand); color: #fff; font-size: 14.5px; font-family: inherit; cursor: pointer; }
 .more-btn:disabled { opacity: .6; }
 
-
-/* ---------- animated background (pure CSS, theme-variable driven) ---------- */
-.bgfx {
-  position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none;
-  background: linear-gradient(180deg, var(--cream) 0%, var(--bg-tint) 100%);
-}
-.bgfx i { position: absolute; border-radius: 50%; will-change: transform; }
-.bgfx i:nth-child(1) {
-  width: 340px; height: 340px; top: -90px; inset-inline-start: -100px;
-  background: radial-gradient(circle, var(--glow-1) 0%, transparent 70%);
-  animation: bgfx-a 36s ease-in-out infinite alternate;
-}
-.bgfx i:nth-child(2) {
-  width: 300px; height: 300px; top: 34%; inset-inline-end: -110px;
-  background: radial-gradient(circle, var(--glow-2) 0%, transparent 70%);
-  animation: bgfx-b 44s ease-in-out infinite alternate;
-}
-.bgfx i:nth-child(3) {
-  width: 260px; height: 260px; bottom: -70px; inset-inline-start: 12%;
-  background: radial-gradient(circle, var(--glow-3) 0%, transparent 70%);
-  animation: bgfx-c 52s ease-in-out infinite alternate;
-}
-@keyframes bgfx-a { from { transform: translate(0, 0) scale(1); } to { transform: translate(42px, 34px) scale(1.14); } }
-@keyframes bgfx-b { from { transform: translate(0, 0) scale(1.08); } to { transform: translate(-38px, -30px) scale(1); } }
-@keyframes bgfx-c { from { transform: translate(0, 0) scale(1); } to { transform: translate(30px, -26px) scale(1.1); } }
-@media (prefers-reduced-motion: reduce) { .bgfx i { animation: none; } }
-
 /* ---------- bottom nav ---------- */
 .nav {
   position: fixed; bottom: 0; right: 0; left: 0; z-index: 20;
@@ -233,7 +199,6 @@ h1, h2, h3, .serif { font-family: 'Thmanyah Serif', serif; }
 </style>
 </head>
 <body>
-<div class="bgfx" aria-hidden="true"><i></i><i></i><i></i></div>
 
 <div id="app"></div>
 <div class="toast" id="toast"></div>
