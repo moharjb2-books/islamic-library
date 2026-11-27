@@ -338,11 +338,34 @@ async function snapSearch(q, ext, offset, limit, includeAudio) {
     const s = new Set(lists[i]);
     cand = cand.filter(x => s.has(x));
   }
+  // Forced-channel (cr_wrr) rows form a contiguous id block. Scan that block
+  // first so the owner's channel always tops the results, then the rest
+  // newest-first. Without this, common words surface only the latest channel.
+  let ordered = null;  // explicit scan sequence when a forced block exists
+  try {
+    const meta = await snapMeta();
+    if (meta && meta.forced_lo != null && meta.forced_hi != null && cand.length > 1) {
+      let a = 0, b = cand.length;
+      while (a < b) { const m = (a + b) >> 1; if (cand[m] < meta.forced_lo) a = m + 1; else b = m; }
+      const lo = a;
+      a = lo; b = cand.length;
+      while (a < b) { const m = (a + b) >> 1; if (cand[m] <= meta.forced_hi) a = m + 1; else b = m; }
+      const hi = a - 1;
+      if (lo <= hi) {
+        ordered = [];
+        for (let i = hi; i >= lo; i--) ordered.push(cand[i]);   // forced block, newest first
+        for (let i = cand.length - 1; i > hi; i--) ordered.push(cand[i]);  // newer channels
+        for (let i = lo - 1; i >= 0; i--) ordered.push(cand[i]);           // older channels
+      }
+    }
+  } catch (e) {}
   const items = [];
   const chunks = {};
-  let pos = cand.length - 1, matched = 0, scanned = 0;
-  while (pos >= 0 && items.length < limit + 1 && scanned < 6000) {
-    const g = cand[pos--]; scanned++;
+  let pos = ordered ? 0 : cand.length - 1, matched = 0, scanned = 0;
+  const step = ordered ? 1 : -1;
+  const last = ordered ? ordered.length : -1;
+  while (pos !== last && items.length < limit + 1 && scanned < 6000) {
+    const g = ordered ? ordered[pos] : cand[pos]; pos += step; scanned++;
     const ci = Math.floor(g / 500);
     if (!chunks[ci]) {
       if (Object.keys(chunks).length >= 8) break;
@@ -647,6 +670,14 @@ async function tg(env, method, body) {
     body: JSON.stringify(body || {}),
   });
   return res.json();
+}
+
+// Temporary group diagnostics: tell the owner what the bot saw/did in groups.
+async function dbgGroup(env, msg, note) {
+  try {
+    if (!env.OWNER_ID) return;
+    await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, text: `🐞 [group ${msg.chat.id}] ${note}` });
+  } catch (e) {}
 }
 
 // ---------- Mini App initData validation ----------
@@ -1117,13 +1148,21 @@ async function handleUpdate(env, update, ctx2) {
     // Groups: the bot stays silent unless the message starts with "بحث";
     // the rest of the message is the query. Private chat is unchanged.
     if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
-      const gm = text.match(/^بحث(?:\s*[:\-]?\s*)([\s\S]*)$/);
-      if (!gm) return;
-      text = gm[1].trim();
-      if (!text) {
-        await tg(env, 'sendMessage', { chat_id: chatId, text: 'اكتب: بحث اسم الكتاب أو المؤلف 📚' });
+      // Keyboards add invisible bidi marks around Arabic; tolerate them, the
+      // "ابحث" variant and Arabic colon. Replies go into the same forum topic.
+      const cleaned = text.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim();
+      const gm = cleaned.match(/^(?:بحث|ابحث)\s*[:\-:]?\s*([\s\S]*)$/);
+      if (!gm) {
+        defer(ctx2, dbgGroup(env, msg, 'ignored (no بحث prefix): "' + cleaned.slice(0, 60) + '"'));
         return;
       }
+      msg.__threadId = msg.message_thread_id || undefined;
+      text = gm[1].trim();
+      if (!text) {
+        await tg(env, 'sendMessage', { chat_id: chatId, message_thread_id: msg.__threadId, text: 'اكتب: بحث اسم الكتاب أو المؤلف 📚' });
+        return;
+      }
+      defer(ctx2, dbgGroup(env, msg, 'query="' + text.slice(0, 60) + '" thread=' + (msg.message_thread_id || '-') + ' from=' + (msg.from && msg.from.id)));
     }
 
     // Forced-subscription gate: everything below needs membership.
@@ -1240,6 +1279,7 @@ async function handleUpdate(env, update, ctx2) {
         for (const row of extLibRows(text)) kb.push(row);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
+          message_thread_id: msg.__threadId,
           text: `🔍 لم أجد نتائج مطابقة لـ«${text}».`
             + (sug.length ? '\n\nهل تقصد:' : '')
             + extText(aj, ext, kbk)
@@ -1259,14 +1299,18 @@ async function handleUpdate(env, update, ctx2) {
       if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + items.length, style: 'primary', icon_custom_emoji_id: ICON.dl }]);
       for (const row of extRows(aj, ext, kbk)) keyboard.push(row);
       keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: miniUrl(env) }, style: 'success', icon_custom_emoji_id: ICON.search }]);
-      await tg(env, 'sendMessage', {
+      const sr = await tg(env, 'sendMessage', {
         chat_id: chatId,
+        message_thread_id: msg.__threadId,
         // Cards only: no header line, no per-source headers. Telegram needs
         // non-empty text, so it is a single neutral emoji. The buttons are one
         // ordered list: his channel, other channels, aljam3, archive.org, ketabonline.
         text: '📚',
         reply_markup: { inline_keyboard: keyboard },
       });
+      if (msg.chat.type !== 'private' && sr && !sr.ok) {
+        await dbgGroup(env, msg, 'sendMessage FAILED: ' + String(sr.description || JSON.stringify(sr)).slice(0, 180));
+      }
       return;
     }
   }
@@ -1974,7 +2018,13 @@ async function handleFetch(request, env, ctx) {
 
     if (path === `/tg/${env.WEBHOOK_SECRET}` && request.method === 'POST') {
       const update = await request.json().catch(() => null);
-      if (update) ctx.waitUntil(handleUpdate(env, update, ctx).catch(e => console.error('handleUpdate failed:', (e && e.stack) || e)));
+      if (update) ctx.waitUntil(handleUpdate(env, update, ctx).catch(e => {
+        console.error('handleUpdate failed:', (e && e.stack) || e);
+        const m = update.message;
+        if (m && m.chat && (m.chat.type === 'group' || m.chat.type === 'supergroup')) {
+          return dbgGroup(env, m, 'CRASH: ' + String((e && e.message) || e).slice(0, 200));
+        }
+      }));
       return json({ ok: true }, 200, false);
     }
 

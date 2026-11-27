@@ -243,12 +243,12 @@ if (typoSug) {
   tgCalls.length = 0;
   await fire({ update_id: 31, message: { message_id: 31, chat: { id: -100999, type: 'supergroup' }, from: { id: 777001, first_name: 'G' }, text: 'مقدمة ابن خلدون' } });
   await new Promise(r => setTimeout(r, 300));
-  check('group: plain message without بحث gets total silence', !tgCalls.some(c => c.method === 'sendMessage'), JSON.stringify(tgCalls).slice(0, 200));
+  check('group: plain message without بحث gets total silence', !tgCalls.some(c => c.method === 'sendMessage' && String(c.body.chat_id) === '-100999'), JSON.stringify(tgCalls).slice(0, 200));
 
   tgCalls.length = 0;
   await fire({ update_id: 32, message: { message_id: 32, chat: { id: -100999, type: 'supergroup' }, from: { id: 777001, first_name: 'G' }, text: 'السلام عليكم' } });
   await new Promise(r => setTimeout(r, 300));
-  check('group: greeting gets total silence', !tgCalls.some(c => c.method === 'sendMessage'), JSON.stringify(tgCalls).slice(0, 200));
+  check('group: greeting gets total silence', !tgCalls.some(c => c.method === 'sendMessage' && String(c.body.chat_id) === '-100999'), JSON.stringify(tgCalls).slice(0, 200));
 
   tgCalls.length = 0;
   await fire({ update_id: 33, message: { message_id: 33, chat: { id: -100999, type: 'supergroup' }, from: { id: 777001, first_name: 'G' }, text: 'بحث مقدمة ابن خلدون' } });
@@ -265,7 +265,7 @@ if (typoSug) {
   tgCalls.length = 0;
   await fire({ update_id: 35, message: { message_id: 35, chat: { id: -100999, type: 'supergroup' }, from: { id: 777001, first_name: 'G' }, text: '/start' } });
   await new Promise(r => setTimeout(r, 300));
-  check('group: /start gets total silence', !tgCalls.some(c => c.method === 'sendMessage'), JSON.stringify(tgCalls).slice(0, 200));
+  check('group: /start gets total silence', !tgCalls.some(c => c.method === 'sendMessage' && String(c.body.chat_id) === '-100999'), JSON.stringify(tgCalls).slice(0, 200));
 }
 
 // 9. API typo search -> suggestions carry {id, title}
