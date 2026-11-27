@@ -473,6 +473,8 @@ async function iaSearch(env, q, limit = 3) {
     const docs = ((j.response && j.response.docs) || [])
       .filter(d => d && d.identifier)
       .filter(d => sunniOk(d.title, d.creator) && !IA_BULK_RE.test(String(d.title || '')))
+      // Skip hits with no real title: a bare identifier (WAQ59561) is not a book name.
+      .filter(d => d.title && String(d.title).trim() && String(d.title).trim() !== d.identifier)
       .slice(0, limit);
     // Resolve a direct PDF/EPUB per item so the button downloads the book
     // itself, like a channel result, instead of opening a search page.
