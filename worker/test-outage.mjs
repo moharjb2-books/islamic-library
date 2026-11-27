@@ -38,6 +38,16 @@ const snapServer = http.createServer(async (req, res) => {
 });
 await new Promise(r => snapServer.listen(8792, r));
 
+// ---- mock Internet Archive advancedsearch ----
+const iaServer = http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ response: { numFound: 2, docs: [
+    { identifier: 'tafsir-ibn-kathir-01', title: 'تفسير ابن كثير ط العلمية', creator: 'ابن كثير' },
+    { identifier: 'another-book-02', title: 'كتاب آخر', creator: null },
+  ] } }));
+});
+await new Promise(r => iaServer.listen(8793, r));
+
 // ---- D1 that is down for everything ----
 const deadStmt = {
   bind() { return this; },
@@ -62,6 +72,7 @@ const env = {
   OWNER_ID: '999999',
   TG_API_BASE: 'http://127.0.0.1:8791',
   SNAPSHOT_BASE: 'http://127.0.0.1:8792',
+  IA_API_BASE: 'http://127.0.0.1:8793',
 };
 
 let pass = 0, fail = 0;
@@ -237,6 +248,15 @@ for (const [p, b] of [
 {
   const { status, j } = await apiGet('/api/me?init=' + ownerInit);
   check('/api/me with D1 dead still answers', status === 200 && j.is_owner === true, JSON.stringify(j));
+}
+
+{
+  tgCalls.length = 0;
+  await fire({ update_id: Date.now() % 100000, message: { message_id: 9, chat: { id: 12345, type: 'private' }, from: { id: 12345, first_name: 'M' }, text: 'كتاب غير موجود محليا ٩٩' } });
+  await new Promise(r => setTimeout(r, 400));
+  const m = tgCalls.find(c => c.method === 'sendMessage' && c.body.chat_id === 12345);
+  const mk = m ? JSON.stringify(m.body.reply_markup || {}) : '';
+  check('not-found also offers archive.org links (federated fallback)', Boolean(m) && /archive.org/.test(m.body.text || '') && mk.includes('archive.org/details/tafsir-ibn-kathir-01'), JSON.stringify(m && m.body).slice(0, 300));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

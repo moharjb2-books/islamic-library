@@ -424,6 +424,36 @@ async function setSetting(env, key, value) {
   settingsCache.at = 0;
 }
 
+// ---------- external sources: Internet Archive live fallback ----------
+// Link-only federated search: when the local library has no match, offer a
+// few archive.org links. No hosting, no D1 writes; results cached in-isolate.
+const iaCache = new Map();
+async function iaSearch(env, q, limit = 3) {
+  const key = (q || '').toLowerCase().trim();
+  if (!key) return [];
+  const hit = iaCache.get(key);
+  if (hit && Date.now() - hit.at < 600000) return hit.items;
+  const base = env.IA_API_BASE || 'https://archive.org';
+  const u = new URL(base + '/advancedsearch.php');
+  u.searchParams.set('q', `(${q}) AND mediatype:texts`);
+  for (const f of ['identifier', 'title', 'creator']) u.searchParams.append('fl[]', f);
+  u.searchParams.set('sort[]', 'downloads desc');
+  u.searchParams.set('rows', String(limit));
+  u.searchParams.set('output', 'json');
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 3000);
+  try {
+    const r = await fetch(u.toString(), { signal: ctrl.signal, headers: { 'user-agent': 'IslamicLibraryBot/1.0 (+https://t.me/ISLAMIC_BOOKS_LIBbot)' } });
+    const j = await r.json();
+    const items = ((j.response && j.response.docs) || []).slice(0, limit)
+      .filter(d => d && d.identifier)
+      .map(d => ({ title: String(d.title || d.identifier).slice(0, 45), url: 'https://archive.org/details/' + d.identifier }));
+    iaCache.set(key, { at: Date.now(), items });
+    if (iaCache.size > 500) iaCache.clear();
+    return items;
+  } catch (e) { return []; } finally { clearTimeout(t); }
+}
+
 // ---------- Telegram API ----------
 async function tg(env, method, body) {
   const base = env.TG_API_BASE || 'https://api.telegram.org';
@@ -922,12 +952,18 @@ async function handleUpdate(env, update, ctx2) {
       const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
       defer(ctx2, logSearch(env, from.id, text, items.length));
       if (!items.length) {
-        let sug = [];
-        try { sug = await suggestTitles(env, text, 3); } catch (e) {}
+        const [sug, ext] = await Promise.all([
+          suggestTitles(env, text, 3).catch(() => []),
+          iaSearch(env, text, 3),
+        ]);
         const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: `🔎 ${String(g.title).slice(0, 45)}`, callback_data: 'sq:' + g.id, style: 'primary', icon_custom_emoji_id: ICON.search }]);
+        for (const e of ext) kb.push([{ text: `🌐 ${e.title}`, url: e.url, style: 'primary' }]);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
-          text: `🔍 لم أجد نتائج مطابقة لـ«${text}».` + (sug.length ? '\n\nهل تقصد:' : '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.'),
+          text: `🔍 لم أجد نتائج مطابقة لـ«${text}».`
+            + (sug.length ? '\n\nهل تقصد:' : '')
+            + (ext.length ? '\n\n🌐 من مكتبة الإنترنت archive.org (روابط خارجية):' : '')
+            + (!sug.length && !ext.length ? '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.' : ''),
           reply_markup: kb.length ? { inline_keyboard: kb } : undefined,
         });
         return;
