@@ -526,6 +526,7 @@ function renderAdmin() {
   app.innerHTML = `
   <div class="admin-hero"><h1>لوحة التحكم</h1>
     <div class="sub">${a.files.toLocaleString('ar-EG')} ملف · ${a.users.toLocaleString('ar-EG')} مستخدم · ${a.channels.length} مصدر</div></div>
+  ${a.db_down ? `<div class="panel" style="border:1px solid #d4af37;background:#fff8e1"><p style="margin:0">${esc(a.notice || '')}</p></div>` : ''}
 
   <div class="panel"><h2>📊 الإحصائيات</h2>
     <div class="ch-row"><span class="cnt">الإجمالي</span><span class="who">${(a.users || 0).toLocaleString('ar-EG')} مستخدم</span></div>

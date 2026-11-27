@@ -196,5 +196,48 @@ check('D1 dead: member search still returns results', tgCalls.some(c => (c.metho
   check('D1 dead: passing recheck sends the full welcome with buttons', Boolean(welcome) && JSON.stringify((welcome && welcome.body.reply_markup) || {}).includes('web_app'), JSON.stringify(tgCalls).slice(0, 300));
 }
 
+// ---- every Mini App / admin endpoint degrades gracefully with D1 dead (no 'internal', no 500) ----
+import nodeCrypto from 'node:crypto';
+function makeInit(user) {
+  const params = new URLSearchParams();
+  params.set('user', JSON.stringify(user));
+  params.set('auth_date', String(Math.floor(Date.now() / 1000)));
+  params.set('query_id', 'q1');
+  const pairs = [...params.entries()].map(([k, v]) => `${k}=${v}`).sort().join('\n');
+  const secret = nodeCrypto.createHmac('sha256', 'WebAppData').update('TEST_TOKEN').digest();
+  params.set('hash', nodeCrypto.createHmac('sha256', secret).update(pairs).digest('hex'));
+  return params.toString();
+}
+const ownerInit = encodeURIComponent(makeInit({ id: 999999, first_name: 'Owner' }));
+async function apiGet(p) { const r = await worker.fetch(new Request('http://local' + p), env, ctx()); return { status: r.status, j: await r.json() }; }
+async function apiPost(p, b) { const r = await worker.fetch(new Request('http://local' + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }), env, ctx()); return { status: r.status, j: await r.json() }; }
+
+{
+  const { status, j } = await apiGet('/api/admin/overview?init=' + ownerInit);
+  check('admin overview with D1 dead: degraded snapshot answer', status === 200 && j.db_down === true && j.files > 50000 && j.notice && j.forced.some(f => f.username === 'cr_wrr'), JSON.stringify(j).slice(0, 200));
+}
+for (const p of ['/api/admin/users', '/api/admin/searches', '/api/admin/admins', '/api/admin/broadcasts']) {
+  const { status, j } = await apiGet(p + '?init=' + ownerInit);
+  check(p + ' with D1 dead: graceful, no internal/500', status === 200 && j.db_down === true && j.error !== 'internal', JSON.stringify(j).slice(0, 120));
+}
+{
+  const { status, j } = await apiPost('/api/fav', { init: makeInit({ id: 12345, first_name: 'U' }), file_id: 1, on: true });
+  check('fav write with D1 dead: clear message, no 500', status === 503 && j.error === 'db_unavailable' && /غير متاحة مؤقت/.test(j.message || ''), JSON.stringify(j));
+}
+for (const [p, b] of [
+  ['/api/admin/channel-toggle', { username: 'cr_wrr', active: true }],
+  ['/api/admin/forced-toggle', { username: 'cr_wrr', active: true }],
+  ['/api/admin/settings', { per_page: 10 }],
+  ['/api/admin/broadcast', { action: 'preview' }],
+]) {
+  b.init = makeInit({ id: 999999, first_name: 'Owner' });
+  const { status, j } = await apiPost(p, b);
+  check(p + ' mutation with D1 dead: clear 503 message', status === 503 && j.error === 'db_unavailable' && /غير متاحة مؤقت/.test(j.message || ''), JSON.stringify(j).slice(0, 150));
+}
+{
+  const { status, j } = await apiGet('/api/me?init=' + ownerInit);
+  check('/api/me with D1 dead still answers', status === 200 && j.is_owner === true, JSON.stringify(j));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

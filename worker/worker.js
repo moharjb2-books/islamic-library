@@ -1236,6 +1236,11 @@ async function apiUser(env, request, body) {
   return validateInitData(env, initData);
 }
 
+const ADMIN_DB_NOTICE = '⚠️ البيانات الحية غير متاحة مؤقتًا (الحد اليومي لقاعدة البيانات) — تُستأنف تلقائيًا. البحث وتحميل الكتب يعملان طبيعي.';
+function dbDown() {
+  return json({ error: 'db_unavailable', message: ADMIN_DB_NOTICE }, 503);
+}
+
 async function handleApi(env, request, path, ctx2) {
   const url = new URL(request.url);
   const settings = await getSettings(env);
@@ -1283,12 +1288,14 @@ async function handleApi(env, request, path, ctx2) {
     if (!user) return json({ error: 'unauthorized' }, 401);
     const fid = parseInt(body.file_id, 10);
     if (!fid) return json({ error: 'bad file_id' }, 400);
-    if (body.on) {
-      await env.DB.prepare('INSERT OR IGNORE INTO favorites(user_id, file_id) VALUES(?,?)').bind(user.id, fid).run();
-    } else {
-      await env.DB.prepare('DELETE FROM favorites WHERE user_id = ? AND file_id = ?').bind(user.id, fid).run();
-    }
-    return json({ ok: true });
+    try {
+      if (body.on) {
+        await env.DB.prepare('INSERT OR IGNORE INTO favorites(user_id, file_id) VALUES(?,?)').bind(user.id, fid).run();
+      } else {
+        await env.DB.prepare('DELETE FROM favorites WHERE user_id = ? AND file_id = ?').bind(user.id, fid).run();
+      }
+      return json({ ok: true });
+    } catch (e) { snapNote(); return dbDown(); }
   }
 
   if (path === '/api/favs') {
@@ -1311,6 +1318,7 @@ async function handleApi(env, request, path, ctx2) {
     if (!(await isAdmin(env, settings, user.id))) return json({ error: 'forbidden' }, 403);
 
     if (path === '/api/admin/overview') {
+      try {
       const files = await env.DB.prepare('SELECT COUNT(*) AS c FROM files').first();
       const users = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first();
       const usersToday = await env.DB.prepare(
@@ -1330,71 +1338,99 @@ async function handleApi(env, request, path, ctx2) {
         searches_no_result: noResult.c || 0,
         channels: chans.results || [], forced: forced.results || [], settings,
       });
+      } catch (e) {
+        snapNote();
+        // D1 down: answer from the snapshot + gate fallback chain, flag it.
+        let meta = {};
+        try { meta = await snapMeta(); } catch (e2) {}
+        let forcedNames = [];
+        try { forcedNames = await forcedList(env); } catch (e2) {}
+        return json({
+          files: meta.files || 0, users: 0, users_today: 0, active_today: 0,
+          searches_total: 0, searches_today: 0, searches_no_result: 0,
+          channels: [], forced: forcedNames.map(u => ({ username: u, active: 1 })),
+          settings, db_down: true, notice: ADMIN_DB_NOTICE,
+        });
+      }
     }
 
     if (path === '/api/admin/users') {
-      const rows = await env.DB.prepare(
-        'SELECT user_id, first_name, username, is_admin, blocked, first_seen, last_seen FROM users ORDER BY last_seen DESC LIMIT 100'
-      ).all();
-      return json({ users: rows.results || [] });
+      try {
+        const rows = await env.DB.prepare(
+          'SELECT user_id, first_name, username, is_admin, blocked, first_seen, last_seen FROM users ORDER BY last_seen DESC LIMIT 100'
+        ).all();
+        return json({ users: rows.results || [] });
+      } catch (e) { snapNote(); return json({ users: [], db_down: true, notice: ADMIN_DB_NOTICE }); }
     }
 
     if (path === '/api/admin/searches') {
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 300);
-      const rows = await env.DB.prepare(
-        'SELECT user_id, q, results, created_at FROM searches ORDER BY id DESC LIMIT ?'
-      ).bind(limit).all();
-      return json({ searches: rows.results || [] });
+      try {
+        const rows = await env.DB.prepare(
+          'SELECT user_id, q, results, created_at FROM searches ORDER BY id DESC LIMIT ?'
+        ).bind(limit).all();
+        return json({ searches: rows.results || [] });
+      } catch (e) { snapNote(); return json({ searches: [], db_down: true, notice: ADMIN_DB_NOTICE }); }
     }
 
     if (path === '/api/admin/channel' && request.method === 'POST') {
       const uname = String(body.username || '').replace(/^@/, '').replace(/^https:\/\/t\.me\//, '').split('/')[0].toLowerCase().trim();
       if (!/^[a-z0-9_]{3,32}$/.test(uname)) return json({ error: 'bad username' }, 400);
-      if (body.action === 'remove') {
-        await env.DB.prepare('DELETE FROM channels WHERE username = ?').bind(uname).run();
-      } else {
-        await env.DB.prepare(
-          `INSERT INTO channels(username, bot_member) VALUES(?, ?)
-           ON CONFLICT(username) DO UPDATE SET active = 1, bot_member = MAX(channels.bot_member, excluded.bot_member)`
-        ).bind(uname, body.bot_member ? 1 : 0).run();
-      }
-      return json({ ok: true });
+      try {
+        if (body.action === 'remove') {
+          await env.DB.prepare('DELETE FROM channels WHERE username = ?').bind(uname).run();
+        } else {
+          await env.DB.prepare(
+            `INSERT INTO channels(username, bot_member) VALUES(?, ?)
+             ON CONFLICT(username) DO UPDATE SET active = 1, bot_member = MAX(channels.bot_member, excluded.bot_member)`
+          ).bind(uname, body.bot_member ? 1 : 0).run();
+        }
+        return json({ ok: true });
+      } catch (e) { snapNote(); return dbDown(); }
     }
 
     if (path === '/api/admin/channel-toggle' && request.method === 'POST') {
-      await env.DB.prepare('UPDATE channels SET active = ? WHERE username = ?')
-        .bind(body.active ? 1 : 0, String(body.username || '').toLowerCase()).run();
-      return json({ ok: true });
+      try {
+        await env.DB.prepare('UPDATE channels SET active = ? WHERE username = ?')
+          .bind(body.active ? 1 : 0, String(body.username || '').toLowerCase()).run();
+        return json({ ok: true });
+      } catch (e) { snapNote(); return dbDown(); }
     }
 
     if (path === '/api/admin/forced' && request.method === 'POST') {
       forcedCache.at = 0;
       const uname = String(body.username || '').replace(/^@/, '').toLowerCase().trim();
       if (!uname) return json({ error: 'bad username' }, 400);
-      if (body.action === 'remove') {
-        await env.DB.prepare('DELETE FROM forced_channels WHERE username = ?').bind(uname).run();
-      } else {
-        await env.DB.prepare(
-          'INSERT INTO forced_channels(username, active) VALUES(?, 1) ON CONFLICT(username) DO UPDATE SET active = 1'
-        ).bind(uname).run();
-      }
-      return json({ ok: true });
+      try {
+        if (body.action === 'remove') {
+          await env.DB.prepare('DELETE FROM forced_channels WHERE username = ?').bind(uname).run();
+        } else {
+          await env.DB.prepare(
+            'INSERT INTO forced_channels(username, active) VALUES(?, 1) ON CONFLICT(username) DO UPDATE SET active = 1'
+          ).bind(uname).run();
+        }
+        return json({ ok: true });
+      } catch (e) { snapNote(); return dbDown(); }
     }
 
     if (path === '/api/admin/forced-toggle' && request.method === 'POST') {
       forcedCache.at = 0;
-      await env.DB.prepare('UPDATE forced_channels SET active = ? WHERE username = ?')
-        .bind(body.active ? 1 : 0, String(body.username || '').toLowerCase()).run();
-      return json({ ok: true });
+      try {
+        await env.DB.prepare('UPDATE forced_channels SET active = ? WHERE username = ?')
+          .bind(body.active ? 1 : 0, String(body.username || '').toLowerCase()).run();
+        return json({ ok: true });
+      } catch (e) { snapNote(); return dbDown(); }
     }
 
     // ---- owner only: manage admins ----
     if (path === '/api/admin/admins') {
       if (!isOwner(env, user.id)) return json({ error: 'owner only' }, 403);
-      const rows = await env.DB.prepare(
-        "SELECT user_id, first_name, username, first_seen FROM users WHERE is_admin = 1 ORDER BY first_seen"
-      ).all();
-      return json({ admins: rows.results || [], owner_id: env.OWNER_ID || '' });
+      try {
+        const rows = await env.DB.prepare(
+          "SELECT user_id, first_name, username, first_seen FROM users WHERE is_admin = 1 ORDER BY first_seen"
+        ).all();
+        return json({ admins: rows.results || [], owner_id: env.OWNER_ID || '' });
+      } catch (e) { snapNote(); return json({ admins: [], owner_id: env.OWNER_ID || '', db_down: true, notice: ADMIN_DB_NOTICE }); }
     }
 
     if (path === '/api/admin/admin' && request.method === 'POST') {
@@ -1402,6 +1438,7 @@ async function handleApi(env, request, path, ctx2) {
       const who = String(body.user || '').trim();
       if (!who) return json({ error: 'missing user' }, 400);
       let target = null;
+      try {
       if (/^\d{5,15}$/.test(who)) {
         target = await env.DB.prepare('SELECT * FROM users WHERE user_id = ?').bind(parseInt(who, 10)).first();
         if (!target && body.action === 'add') {
@@ -1412,25 +1449,32 @@ async function handleApi(env, request, path, ctx2) {
         const uname = who.replace(/^@/, '').toLowerCase();
         target = await env.DB.prepare('SELECT * FROM users WHERE lower(username) = ?').bind(uname).first();
       }
+      } catch (e) { snapNote(); return dbDown(); }
       if (!target) return json({ error: 'user_not_found', message: 'لم يبدأ هذا المستخدم البوت بعد. اطلب منه فتح البوت وإرسال /start أولًا.' }, 404);
       if (String(target.user_id) === String(env.OWNER_ID)) return json({ error: 'cannot_change_owner' }, 400);
-      await env.DB.prepare('UPDATE users SET is_admin = ? WHERE user_id = ?')
-        .bind(body.action === 'remove' ? 0 : 1, target.user_id).run();
-      return json({ ok: true, user_id: target.user_id });
+      try {
+        await env.DB.prepare('UPDATE users SET is_admin = ? WHERE user_id = ?')
+          .bind(body.action === 'remove' ? 0 : 1, target.user_id).run();
+        return json({ ok: true, user_id: target.user_id });
+      } catch (e) { snapNote(); return dbDown(); }
     }
 
     if (path === '/api/admin/settings' && request.method === 'POST') {
       const allowed = ['welcome_on', 'per_page', 'protect_content', 'notify_new'];
-      for (const k of allowed) {
-        if (body[k] !== undefined) await setSetting(env, k, String(body[k]));
-      }
-      return json({ ok: true });
+      try {
+        for (const k of allowed) {
+          if (body[k] !== undefined) await setSetting(env, k, String(body[k]));
+        }
+        return json({ ok: true });
+      } catch (e) { snapNote(); return dbDown(); }
     }
 
     if (path === '/api/admin/broadcast' && request.method === 'POST') {
       if (body.action === 'preview') {
-        const c = await env.DB.prepare('SELECT COUNT(*) AS c FROM users WHERE blocked = 0').first();
-        return json({ ok: true, users: c.c || 0 });
+        try {
+          const c = await env.DB.prepare('SELECT COUNT(*) AS c FROM users WHERE blocked = 0').first();
+          return json({ ok: true, users: c.c || 0 });
+        } catch (e) { snapNote(); return dbDown(); }
       }
       const txt = String(body.text || '').trim();
       if (!txt) return json({ error: 'empty text' }, 400);
@@ -1438,17 +1482,21 @@ async function handleApi(env, request, path, ctx2) {
         const tr = await tg(env, 'sendMessage', { chat_id: Number(env.OWNER_ID), text: txt });
         return json({ ok: true, test: true, delivered: Boolean(tr && tr.ok !== false && (tr.message_id || (tr.result && tr.result.message_id))) });
       }
-      const r = await env.DB.prepare(
-        "INSERT INTO broadcasts(admin_id, kind, text, status) VALUES(?, 'text', ?, 'pending')"
-      ).bind(user.id, txt).run();
-      return json({ ok: true, id: r.meta.last_row_id });
+      try {
+        const r = await env.DB.prepare(
+          "INSERT INTO broadcasts(admin_id, kind, text, status) VALUES(?, 'text', ?, 'pending')"
+        ).bind(user.id, txt).run();
+        return json({ ok: true, id: r.meta.last_row_id });
+      } catch (e) { snapNote(); return dbDown(); }
     }
 
     if (path === '/api/admin/broadcasts') {
-      const rows = await env.DB.prepare(
-        'SELECT id, kind, text, status, sent, failed, blocked, created_at FROM broadcasts ORDER BY id DESC LIMIT 10'
-      ).all();
-      return json({ broadcasts: rows.results || [] });
+      try {
+        const rows = await env.DB.prepare(
+          'SELECT id, kind, text, status, sent, failed, blocked, created_at FROM broadcasts ORDER BY id DESC LIMIT 10'
+        ).all();
+        return json({ broadcasts: rows.results || [] });
+      } catch (e) { snapNote(); return json({ broadcasts: [], db_down: true, notice: ADMIN_DB_NOTICE }); }
     }
 
     return json({ error: 'not found' }, 404);
