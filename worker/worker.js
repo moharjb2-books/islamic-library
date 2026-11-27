@@ -1298,7 +1298,11 @@ async function handleUpdate(env, update, ctx2) {
       });
       if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + items.length, style: 'primary', icon_custom_emoji_id: ICON.dl }]);
       for (const row of extRows(aj, ext, kbk)) keyboard.push(row);
-      keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: miniUrl(env) }, style: 'success', icon_custom_emoji_id: ICON.search }]);
+      // Telegram rejects web_app buttons in groups (BUTTON_TYPE_INVALID):
+      // there the button deep-links to the bot's Mini App over plain t.me.
+      keyboard.push([msg.chat.type === 'private'
+        ? { text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: miniUrl(env) }, style: 'success', icon_custom_emoji_id: ICON.search }
+        : { text: '🔍 تصفية النتائج في صفحة البحث', url: `https://t.me/${env.BOT_USERNAME}?startapp`, style: 'success', icon_custom_emoji_id: ICON.search }]);
       const sr = await tg(env, 'sendMessage', {
         chat_id: chatId,
         message_thread_id: msg.__threadId,
