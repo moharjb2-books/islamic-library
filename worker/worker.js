@@ -572,7 +572,7 @@ async function handleUpdate(env, update) {
       return;
     }
 
-    const text = (msg.text || '').trim();
+    let text = (msg.text || '').trim();
 
     if (text.startsWith('/start')) {
       const param = text.split(' ')[1] || '';
