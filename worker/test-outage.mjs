@@ -220,13 +220,13 @@ check('api/stats falls back to snapshot meta', stJ.files > 50000 && stJ.snapshot
 // 6. typo search while D1 is dead -> "هل تقصد" with suggestion buttons
 tgCalls.length = 0;
 await fire({ update_id: 6, message: { message_id: 6, chat: { id: 12345, type: 'private' }, from: { id: 12345, first_name: 'T' }, text: 'مقمدة ابن خلدونن' } });
-const sugMsg = tgCalls.find(c => c.method === 'sendMessage');
+const sugMsg = tgCalls.find(c => c.method === 'sendMessage' && String(c.body.chat_id) !== '999999');
 check('typo search gets did-you-mean with buttons (D1 dead)', Boolean(sugMsg && /هل تقصد/.test(sugMsg.body.text) && sugMsg.body.reply_markup && sugMsg.body.reply_markup.inline_keyboard.length > 0), JSON.stringify(tgCalls).slice(0, 300));
 
 // 7. gibberish search while D1 is dead -> clear not-found, never silent
 tgCalls.length = 0;
 await fire({ update_id: 7, message: { message_id: 7, chat: { id: 12345, type: 'private' }, from: { id: 12345, first_name: 'T' }, text: 'خخخخخخخقققق' } });
-const nfMsg = tgCalls.find(c => c.method === 'sendMessage');
+const nfMsg = tgCalls.find(c => c.method === 'sendMessage' && String(c.body.chat_id) !== '999999');
 check('gibberish search still gets a reply (D1 dead)', Boolean(nfMsg && /لم أجد/.test(nfMsg.body.text)), JSON.stringify(tgCalls).slice(0, 300));
 
 // 8. sq: suggestion-pick callback while D1 is dead -> results via snapshot
@@ -259,7 +259,7 @@ if (typoSug) {
   tgCalls.length = 0;
   await fire({ update_id: 34, message: { message_id: 34, chat: { id: -100999, type: 'group' }, from: { id: 777001, first_name: 'G' }, text: 'بحث' } });
   await new Promise(r => setTimeout(r, 300));
-  const gh = tgCalls.find(c => c.method === 'sendMessage');
+  const gh = tgCalls.find(c => c.method === 'sendMessage' && String(c.body.chat_id) !== '999999');
   check('group: bare بحث gets a usage hint', Boolean(gh && /بحث اسم الكتاب/.test(gh.body.text || '')), JSON.stringify(gh && gh.body).slice(0, 200));
 
   tgCalls.length = 0;

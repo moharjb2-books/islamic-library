@@ -428,7 +428,20 @@ async function snapSuggest(q, limit) {
     const shard = await snapGet('/idx/' + encodeURIComponent(t.t.slice(0, 2)) + '.json').catch(() => null);
     const posts = shard ? shard[t.t] : null;
     if (!posts) continue;
-    for (const g of posts.slice(-150)) candIdx.push(g);
+    // Prefer the forced channel's id block (cr_wrr) over the newest channels,
+    // same as snapSearch, then fill from the rest newest-first.
+    let chosen = posts.slice(-150);
+    try {
+      const meta = await snapMeta();
+      if (meta && meta.forced_lo != null && meta.forced_hi != null) {
+        const inBlock = posts.filter(g => g >= meta.forced_lo && g <= meta.forced_hi);
+        chosen = inBlock.slice(-150);
+        if (chosen.length < 150) {
+          chosen = chosen.concat(posts.filter(g => g < meta.forced_lo || g > meta.forced_hi).slice(-(150 - chosen.length)));
+        }
+      }
+    } catch (e) {}
+    for (const g of chosen) candIdx.push(g);
     if (candIdx.length >= 400) break;
   }
   const chunks = {};
@@ -672,11 +685,24 @@ async function tg(env, method, body) {
   return res.json();
 }
 
-// Temporary group diagnostics: tell the owner what the bot saw/did in groups.
-async function dbgGroup(env, msg, note) {
+// Owner inbox mirror: every message users send the bot (private chats, and
+// group search queries) is copied to the owner's own chat with the bot,
+// with sender identity. Fire-and-forget; never blocks or breaks replies.
+async function notifyOwnerMsg(env, msg, kind) {
   try {
     if (!env.OWNER_ID) return;
-    await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, text: `🐞 [group ${msg.chat.id}] ${note}` });
+    const from = msg.from || {};
+    if (String(from.id) === String(env.OWNER_ID)) return;
+    const who = [from.first_name, from.last_name].filter(Boolean).join(' ')
+      || (msg.sender_chat && msg.sender_chat.title) || 'مجهول';
+    const un = from.username ? ` @${from.username}` : '';
+    const id = from.id ? `\n🆔 ${from.id}` : '';
+    const text = String(msg.text || msg.caption || '').slice(0, 800);
+    const media = msg.document ? `📎 ${msg.document.file_name || 'ملف'}`
+      : msg.photo ? '📎 صورة' : msg.audio ? '📎 صوت' : msg.video ? '📎 فيديو'
+      : msg.voice ? '📎 رسالة صوتية' : '';
+    if (!text && !media) return;
+    await tg(env, 'sendMessage', { chat_id: env.OWNER_ID, text: `📩 ${kind}\n👤 ${who}${un}${id}\n💬 ${text || media}` });
   } catch (e) {}
 }
 
@@ -1102,6 +1128,7 @@ async function handleUpdate(env, update, ctx2) {
 
     const from = msg.from || {};
     defer(ctx2, trackUser(env, from));
+    if (msg.chat.type === 'private') defer(ctx2, notifyOwnerMsg(env, msg, 'رسالة خاصة للبوت'));
 
     // Owner export ingest: Telegram Desktop result.json
     if (msg.document && msg.chat.type === 'private' && isOwner(env, from.id) && /\.json$/i.test(msg.document.file_name || '')) {
@@ -1152,17 +1179,14 @@ async function handleUpdate(env, update, ctx2) {
       // "ابحث" variant and Arabic colon. Replies go into the same forum topic.
       const cleaned = text.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim();
       const gm = cleaned.match(/^(?:بحث|ابحث)\s*[:\-:]?\s*([\s\S]*)$/);
-      if (!gm) {
-        defer(ctx2, dbgGroup(env, msg, 'ignored (no بحث prefix): "' + cleaned.slice(0, 60) + '"'));
-        return;
-      }
+      if (!gm) return;
       msg.__threadId = msg.message_thread_id || undefined;
       text = gm[1].trim();
       if (!text) {
         await tg(env, 'sendMessage', { chat_id: chatId, message_thread_id: msg.__threadId, text: 'اكتب: بحث اسم الكتاب أو المؤلف 📚' });
         return;
       }
-      defer(ctx2, dbgGroup(env, msg, 'query="' + text.slice(0, 60) + '" thread=' + (msg.message_thread_id || '-') + ' from=' + (msg.from && msg.from.id)));
+      defer(ctx2, notifyOwnerMsg(env, msg, `بحث في الجروب «${msg.chat.title || ''}»`));
     }
 
     // Forced-subscription gate: everything below needs membership.
@@ -1313,7 +1337,7 @@ async function handleUpdate(env, update, ctx2) {
         reply_markup: { inline_keyboard: keyboard },
       });
       if (msg.chat.type !== 'private' && sr && !sr.ok) {
-        await dbgGroup(env, msg, 'sendMessage FAILED: ' + String(sr.description || JSON.stringify(sr)).slice(0, 180));
+        console.error('group sendMessage failed:', sr.description || sr);
       }
       return;
     }
@@ -2022,13 +2046,7 @@ async function handleFetch(request, env, ctx) {
 
     if (path === `/tg/${env.WEBHOOK_SECRET}` && request.method === 'POST') {
       const update = await request.json().catch(() => null);
-      if (update) ctx.waitUntil(handleUpdate(env, update, ctx).catch(e => {
-        console.error('handleUpdate failed:', (e && e.stack) || e);
-        const m = update.message;
-        if (m && m.chat && (m.chat.type === 'group' || m.chat.type === 'supergroup')) {
-          return dbgGroup(env, m, 'CRASH: ' + String((e && e.message) || e).slice(0, 200));
-        }
-      }));
+      if (update) ctx.waitUntil(handleUpdate(env, update, ctx).catch(e => console.error('handleUpdate failed:', (e && e.stack) || e)));
       return json({ ok: true }, 200, false);
     }
 
