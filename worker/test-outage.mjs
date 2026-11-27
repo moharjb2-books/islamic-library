@@ -185,5 +185,16 @@ check('D1 dead: member search still returns results', tgCalls.some(c => (c.metho
   check('D1 dead: recheck while non-member alerts and does not pass', tgCalls.some(c => c.method === 'answerCallbackQuery' && /غير مشترك/.test(c.body.text || '')) && !tgCalls.some(c => /تم التحقق من اشتراكك/.test((c.body && c.body.text) || '')), JSON.stringify(tgCalls).slice(0, 300));
 }
 
+{
+  tgCalls.length = 0;
+  await worker.fetch(new Request('http://local/tg/wh123', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ update_id: Date.now() % 100000, callback_query: { id: 'cb2', from: { id: 555002, first_name: 'M' }, message: { message_id: 3, chat: { id: 555002, type: 'private' } }, data: 'recheck' } }),
+  }), env, ctx());
+  await new Promise(r => setTimeout(r, 300));
+  const welcome = tgCalls.find(c => c.method === 'sendMessage' && c.body.chat_id === 555002 && /أهلًا بك في المكتبة الإسلامية الشاملة/.test(c.body.text || ''));
+  check('D1 dead: passing recheck sends the full welcome with buttons', Boolean(welcome) && JSON.stringify((welcome && welcome.body.reply_markup) || {}).includes('web_app'), JSON.stringify(tgCalls).slice(0, 300));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

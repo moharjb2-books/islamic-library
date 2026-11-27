@@ -1019,7 +1019,7 @@ async function handleUpdate(env, update, ctx2) {
         await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'ما زلت غير مشترك في كل القنوات', show_alert: true });
       } else {
         await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '✅ تم التحقق، يمكنك الاستخدام الآن' });
-        await tg(env, 'sendMessage', { chat_id: chatId, text: '✅ تم التحقق من اشتراكك. أرسل اسم الكتاب للبحث.' });
+        await sendWelcome(env, settings2, chatId);
       }
       return;
     }
