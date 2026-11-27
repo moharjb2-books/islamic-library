@@ -539,15 +539,39 @@ async function deliverFile(env, settings, chatId, file) {
   return tg(env, 'sendMessage', { chat_id: chatId, text: `تعذر تسليم: ${file.title}` });
 }
 
+let forcedCache = { at: 0, list: null };
+async function forcedList(env) {
+  if (forcedCache.list && (Date.now() - forcedCache.at) < 300000) return forcedCache.list;
+  try {
+    const rows = await env.DB.prepare('SELECT username FROM forced_channels WHERE active = 1').all();
+    let list = (rows.results || []).map(r => r.username);
+    if (!list.length && env.MAIN_CHANNEL) {
+      // First run: seed the main channel so the gate is on by default; admins can remove it.
+      const seeded = await env.DB.prepare("SELECT value FROM settings WHERE key = 'forced_seeded'").first();
+      if (!seeded) {
+        const mc = String(env.MAIN_CHANNEL).toLowerCase();
+        await env.DB.prepare('INSERT OR IGNORE INTO forced_channels(username, active) VALUES(?, 1)').bind(mc).run();
+        await env.DB.prepare("INSERT OR REPLACE INTO settings(key, value) VALUES('forced_seeded', '1')").run();
+        list = [mc];
+      }
+    }
+    forcedCache = { at: Date.now(), list };
+  } catch (e) {
+    // fail open: a config-read error must never lock searchers out
+    if (!forcedCache.list) forcedCache = { at: Date.now(), list: [] };
+  }
+  return forcedCache.list;
+}
+
 async function checkForced(env, userId) {
-  const rows = await env.DB.prepare('SELECT username FROM forced_channels WHERE active = 1').all();
+  const list = await forcedList(env);
   const missing = [];
-  for (const r of rows.results || []) {
+  for (const u of list) {
     try {
-      const m = await tg(env, 'getChatMember', { chat_id: '@' + r.username, user_id: userId });
+      const m = await tg(env, 'getChatMember', { chat_id: '@' + u, user_id: userId });
       const st = m && m.ok && m.result ? m.result.status : 'left';
-      if (['left', 'kicked'].includes(st)) missing.push(r.username);
-    } catch (e) { missing.push(r.username); }
+      if (['left', 'kicked'].includes(st)) missing.push(u);
+    } catch (e) { missing.push(u); }
   }
   return missing;
 }
@@ -628,6 +652,15 @@ async function handleUpdate(env, update) {
 
     let text = (msg.text || '').trim();
 
+    // Forced-subscription gate: everything below needs membership.
+    // Owner/admins and the admin-claim deep link bypass; the config read fails
+    // open so a database hiccup never locks searchers out.
+    if (msg.chat.type === 'private' && !text.startsWith('/start admin_')
+        && !isOwner(env, from.id) && !(await isAdmin(env, settings, from.id))) {
+      const missing0 = await checkForced(env, from.id);
+      if (missing0.length) return sendForced(env, chatId, missing0);
+    }
+
     if (text.startsWith('/start')) {
       const param = text.split(' ')[1] || '';
       // Admin claim: /start admin_<code>
@@ -648,11 +681,7 @@ async function handleUpdate(env, update) {
       if (param.startsWith('dl_')) {
         const id = parseInt(param.slice(3), 10);
         const file = await env.DB.prepare('SELECT * FROM files WHERE id = ?').bind(id).first();
-        if (file) {
-          const missing = await checkForced(env, from.id);
-          if (missing.length) return sendForced(env, chatId, missing);
-          return deliverFile(env, settings, chatId, file);
-        }
+        if (file) return deliverFile(env, settings, chatId, file);
       }
       return sendWelcome(env, settings, chatId);
     }
@@ -729,7 +758,6 @@ async function handleUpdate(env, update) {
         });
         return;
       }
-      const missing = await checkForced(env, from.id);
       const keyboard = items.map(f => {
         const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') {
@@ -753,6 +781,14 @@ async function handleUpdate(env, update) {
     const data = cb.data || '';
     const chatId = cb.message ? cb.message.chat.id : cb.from.id;
     const settings2 = await getSettings(env);
+    if (data !== 'recheck' && cb.message && cb.message.chat && cb.message.chat.type === 'private'
+        && !isOwner(env, cb.from.id) && !(await isAdmin(env, settings2, cb.from.id))) {
+      const missingCb = await checkForced(env, cb.from.id);
+      if (missingCb.length) {
+        await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'اشترك في القنوات المطلوبة أولًا', show_alert: true });
+        return sendForced(env, chatId, missingCb);
+      }
+    }
     if (data === 'help') {
       await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
       await tg(env, 'sendMessage', {
@@ -837,8 +873,6 @@ async function handleUpdate(env, update) {
         await tg(env, 'sendMessage', { chat_id: chatId, text: 'انتهت النتائج ✅' });
         return;
       }
-      const missing = await checkForced(env, cb.from.id);
-      if (missing.length) return sendForced(env, chatId, missing);
       const keyboard = items.map(f => {
         const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id }];
@@ -865,13 +899,11 @@ async function handleUpdate(env, update) {
         await tg(env, 'sendMessage', { chat_id: chatId, text: `🔍 لم أجد نتائج مطابقة لـ«${q2}».` });
         return;
       }
-      const missing = await checkForced(env, cb.from.id);
       const keyboard = items.map(f2 => {
         const label = `📕 ${(f2.file_name || f2.title).slice(0, 40)} (${isAudioExt(f2.ext) ? 'صوتي' : (f2.ext || '').toUpperCase()} ${fmtSize(f2.size_bytes)})`;
         if (f2.file_id || f2.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f2.id }];
         return [{ text: label, url: f2.link }];
       });
-      if (missing.length) return sendForced(env, chatId, missing);
       await tg(env, 'sendMessage', { chat_id: chatId, text: `🔍 نتائج «${q2}»:`, reply_markup: { inline_keyboard: keyboard } });
       return;
     }
@@ -881,11 +913,6 @@ async function handleUpdate(env, update) {
       if (!file) {
         await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'الملف لم يعد متاحًا', show_alert: true });
         return;
-      }
-      const missing = await checkForced(env, cb.from.id);
-      if (missing.length) {
-        await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'اشترك في القنوات المطلوبة أولًا', show_alert: true });
-        return sendForced(env, chatId, missing);
       }
       await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '📤 جارٍ إرسال الملف...' });
       return deliverFile(env, settings, chatId, file);
@@ -1155,6 +1182,7 @@ async function handleApi(env, request, path) {
     }
 
     if (path === '/api/admin/forced' && request.method === 'POST') {
+      forcedCache.at = 0;
       const uname = String(body.username || '').replace(/^@/, '').toLowerCase().trim();
       if (!uname) return json({ error: 'bad username' }, 400);
       if (body.action === 'remove') {
@@ -1168,6 +1196,7 @@ async function handleApi(env, request, path) {
     }
 
     if (path === '/api/admin/forced-toggle' && request.method === 'POST') {
+      forcedCache.at = 0;
       await env.DB.prepare('UPDATE forced_channels SET active = ? WHERE username = ?')
         .bind(body.active ? 1 : 0, String(body.username || '').toLowerCase()).run();
       return json({ ok: true });
