@@ -285,8 +285,8 @@ function editDist(a, b, max) {
 }
 
 function tokenScore(nq, cand) {
-  const qw = nq.split(/\s+/).filter(Boolean);
-  const cw = String(cand || '').split(/[\s_\-–—.,()]+/).filter(Boolean);
+  const qw = nq.split(/\s+/).filter(Boolean).slice(0, 8);
+  const cw = String(cand || '').split(/[\s_\-–—.,()]+/).filter(Boolean).slice(0, 40);
   if (!qw.length || !cw.length) return 99;
   let total = 0;
   for (const w of qw) {
@@ -312,7 +312,7 @@ function prettyTitle(t) {
 
 async function suggestTitles(env, q, limit = 3) {
   const nq = norm(q);
-  if (!nq || nq.length < 3) return [];
+  if (!nq || nq.length < 3 || nq.length > 80) return [];
   const rows = await env.DB.prepare(
     'SELECT id, title, title_norm, file_name FROM files ORDER BY id DESC LIMIT 4000'
   ).all();
@@ -631,6 +631,7 @@ async function handleUpdate(env, update) {
 
     if (text && !text.startsWith('/')) {
       // Plain search in chat
+      if (text.length > 200) text = text.slice(0, 200);
       const perPage = parseInt(settings.per_page, 10) || 10;
       const audioAsked = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(text);
       const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
@@ -967,7 +968,7 @@ async function handleApi(env, request, path) {
   }
 
   if (path === '/api/search' || path === '/api/latest') {
-    const q = url.searchParams.get('q') || '';
+    const q = (url.searchParams.get('q') || '').slice(0, 200);
     const ext = url.searchParams.get('ext') || 'all';
     const off = parseInt(url.searchParams.get('off') || '0', 10) || 0;
     const perPage = parseInt(settings.per_page, 10) || 10;
