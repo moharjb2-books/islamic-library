@@ -54,6 +54,20 @@ const iaServer = http.createServer((req, res) => {
 });
 await new Promise(r => iaServer.listen(8793, r));
 
+// ---- mock ketabonline API ----
+const kbServer = http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ data: [
+    { id: 2422, lang: 'ar', is_free: 1, title: 'العمل <em>الصالح</em>', authors: [{ name: 'سامي محمد' }],
+      files: { data: { url: 'https://s2.ketabonline.com/books/2422/2422.data.zip', size: 636914 },
+               pdf: { url: 'https://s2.ketabonline.com/books/2422/2422.pdf.zip', size: 4965008 } } },
+    { id: 6572, lang: 'ar', is_free: 1, title: 'كتاب بلا ملف', authors: [], files: { data: { url: 'x' }, pdf: null } },
+    { id: 9999, lang: 'ar', is_free: 0, title: 'كتاب مدفوع يجب استبعاده', authors: [], files: { pdf: null } },
+    { id: 8888, lang: 'en', is_free: 1, title: 'English book must be excluded', authors: [], files: { pdf: null } },
+  ] }));
+});
+await new Promise(r => kbServer.listen(8794, r));
+
 // ---- D1 that is down for everything ----
 const deadStmt = {
   bind() { return this; },
@@ -79,6 +93,7 @@ const env = {
   TG_API_BASE: 'http://127.0.0.1:8791',
   SNAPSHOT_BASE: 'http://127.0.0.1:8792',
   IA_API_BASE: 'http://127.0.0.1:8793',
+  KB_API_BASE: 'http://127.0.0.1:8794',
 };
 
 let pass = 0, fail = 0;
@@ -265,6 +280,7 @@ for (const [p, b] of [
   check('not-found also offers archive.org direct-download links (federated fallback)', Boolean(m) && /archive.org/.test(m.body.text || '') && mk.includes('/download/tafsir-ibn-kathir-01/tafsir_text.pdf'), JSON.stringify(m && m.body).slice(0, 300));
   check('IA item without files falls back to its details page', mk.includes('/details/another-book-02'), mk.slice(0, 300));
   check('not-found offers Sunni external-library search links', mk.includes('shamela.ws/search?q=') && mk.includes('waqfeya.net/search?q=') && mk.includes('dorar.net/site/search?skeys=') && mk.includes('islamhouse.com/ar/search/'), mk.slice(0, 300));
+  check('not-found offers ketabonline reader + direct PDF, free+Arabic only, tags stripped', mk.includes('ketabonline.com/ar/books/2422') && mk.includes('2422.pdf.zip') && mk.includes('ketabonline.com/ar/books/6572') && !mk.includes('9999') && !mk.includes('8888') && !mk.includes('<em>') && mk.includes('سامي محمد'), mk.slice(0, 400));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

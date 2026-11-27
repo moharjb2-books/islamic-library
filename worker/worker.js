@@ -503,6 +503,43 @@ async function iaSearch(env, q, limit = 3) {
   } catch (e) { return []; } finally { clearTimeout(t); }
 }
 
+// ketabonline.com: free open API, Shamela-based Sunni library. One search
+// call returns title/authors/files; some books carry a direct PDF zip.
+const kbCache = new Map();
+async function kbSearch(env, q, limit = 3) {
+  const key = (q || '').toLowerCase().trim();
+  if (!key) return [];
+  const hit = kbCache.get(key);
+  if (hit && Date.now() - hit.at < 600000) return hit.items;
+  const base = env.KB_API_BASE || 'https://backend.ketabonline.com';
+  const u = new URL(base + '/api/v2/books');
+  u.searchParams.set('q', q);
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 2000);
+  try {
+    const r = await fetch(u.toString(), { signal: ctrl.signal, headers: { 'user-agent': 'IslamicLibraryBot/1.0 (+https://t.me/ISLAMIC_BOOKS_LIBbot)' } });
+    const j = await r.json();
+    const strip = (s) => String(s || '').replace(/<[^>]+>/g, '').trim();
+    const items = ((j && j.data) || [])
+      .filter(b => b && b.id && b.lang === 'ar' && (b.is_free === 1 || b.is_free === true))
+      .slice(0, limit)
+      .map(b => {
+        const author = (b.authors || []).map(a => strip(a.name)).filter(Boolean).join('، ');
+        const title = strip(b.title).slice(0, 28) + (author ? ` · ${author.slice(0, 14)}` : '');
+        const pdf = b.files && b.files.pdf && b.files.pdf.url ? b.files.pdf : null;
+        return {
+          title,
+          url: `https://ketabonline.com/ar/books/${b.id}`,
+          pdf: pdf ? pdf.url : null,
+          pdfSize: pdf && pdf.size ? Math.round(Number(pdf.size) / 1e6) : 0,
+        };
+      });
+    kbCache.set(key, { at: Date.now(), items });
+    if (kbCache.size > 500) kbCache.clear();
+    return items;
+  } catch (e) { return []; } finally { clearTimeout(t); }
+}
+
 // ---------- Telegram API ----------
 async function tg(env, method, body) {
   const base = env.TG_API_BASE || 'https://api.telegram.org';
@@ -1001,18 +1038,25 @@ async function handleUpdate(env, update, ctx2) {
       const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
       defer(ctx2, logSearch(env, from.id, text, items.length));
       if (!items.length) {
-        const [sug, ext] = await Promise.all([
+        const [sug, ext, kbk] = await Promise.all([
           suggestTitles(env, text, 3).catch(() => []),
           iaSearch(env, text, 3),
+          kbSearch(env, text, 3),
         ]);
         const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: `🔎 ${String(g.title).slice(0, 45)}`, callback_data: 'sq:' + g.id, style: 'primary', icon_custom_emoji_id: ICON.search }]);
         for (const e of ext) kb.push([{ text: `🌐 ${e.title}`, url: e.url, style: 'primary' }]);
+        for (const k of kbk) {
+          const row = [{ text: `📗 ${k.title}`, url: k.url, style: 'primary' }];
+          if (k.pdf) row.push({ text: `⬇️ PDF${k.pdfSize ? ' ' + k.pdfSize + 'MB' : ''}`, url: k.pdf, style: 'success' });
+          kb.push(row);
+        }
         for (const row of extLibRows(text)) kb.push(row);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
           text: `🔍 لم أجد نتائج مطابقة لـ«${text}».`
             + (sug.length ? '\n\nهل تقصد:' : '')
             + (ext.length ? '\n\n🌐 تحميل مباشر من archive.org:' : '')
+            + (kbk.length ? '\n\n📗 من موقع كتاب أونلاين (اقرأ أو حمّل):' : '')
             + '\n\n🔗 أو ابحث في مكتبات سنّية موثوقة:'
             + (!sug.length && !ext.length ? '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.' : ''),
           reply_markup: kb.length ? { inline_keyboard: kb } : undefined,
@@ -1368,12 +1412,14 @@ async function handleApi(env, request, path, ctx2) {
     let suggestions = null;
     let external = null;
     if (q && !items.length) {
-      const [sug2, ext2] = await Promise.all([
+      const [sug2, ext2, kb2] = await Promise.all([
         suggestTitles(env, q, 3).catch(() => []),
         iaSearch(env, q, 3).catch(() => []),
+        kbSearch(env, q, 3).catch(() => []),
       ]);
       suggestions = sug2;
-      external = ext2;
+      external = (ext2 || []).map(e2 => ({ ...e2, src: 'ia' }))
+        .concat((kb2 || []).map(k2 => ({ title: k2.title, url: k2.pdf || k2.url, src: 'kb' })));
     }
     return json({ items: items.map(publicFile), hasMore, counts, suggestions, external });
   }
