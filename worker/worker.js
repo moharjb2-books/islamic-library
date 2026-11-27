@@ -706,6 +706,43 @@ async function notifyOwnerMsg(env, msg, kind) {
   } catch (e) {}
 }
 
+// Owner export ingest: Telegram Desktop result.json sent to the bot privately.
+// Acks at once, parses, and batch-inserts into D1 (admin parity; the public
+// search snapshot is merged separately from the same file). Never throws.
+async function handleExportIngest(env, chatId, msg) {
+  const doc = msg.document;
+  await tg(env, 'sendMessage', { chat_id: chatId, text: '📥 استلمت ملف التصدير، جاري فحصه وأرشفته...' });
+  try {
+    const gf = await tg(env, 'getFile', { file_id: doc.file_id });
+    if (!gf.ok || !gf.result || !gf.result.file_path) throw new Error('getFile: ' + JSON.stringify(gf).slice(0, 120));
+    const base = env.TG_API_BASE || 'https://api.telegram.org';
+    const res = await fetch(`${base}/file/bot${env.BOT_TOKEN}/${gf.result.file_path}`);
+    if (!res.ok) throw new Error('download ' + res.status);
+    const data = await res.json();
+    const chName = data.name || 'قناة';
+    const chKey = 'export_' + (data.id || 'x');
+    const msgs = Array.isArray(data.messages) ? data.messages : [];
+    const OKEXT = /\.(pdf|docx?|epub|rar|zip|txt|mp3|m4a|wav|ogg|mobi|djvu)$/i;
+    const docs = msgs.filter(m => m.file_name && OKEXT.test(m.file_name));
+    let added = 0;
+    for (let i = 0; i < docs.length; i += 400) {
+      const batch = docs.slice(i, i + 400).map(m => {
+        const cap = typeof m.text === 'string' ? m.text : '';
+        const title = (cap.trim() || (m.file_name || '').replace(/\.[A-Za-z0-9]{1,5}$/, '').replace(/_/g, ' ').trim()).slice(0, 300);
+        const ext = ((m.file_name || '').split('.').pop() || '').toLowerCase();
+        return env.DB.prepare(
+          'INSERT OR IGNORE INTO files(title, title_norm, author, author_norm, ext, size_bytes, channel, message_id, link, delivery, file_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)'
+        ).bind(title, norm(title), '', '', ext, m.file_size || 0, chKey, m.id || 0, '', 'link', (m.file_name || '').slice(0, 500));
+      });
+      try { await env.DB.batch(batch); added += batch.length; } catch (e) { console.error('export batch failed:', e); break; }
+    }
+    await tg(env, 'sendMessage', { chat_id: chatId, text: `✅ «${chName}»: وصلني ${docs.length} ملف وتمت أرشفتهم. هتظهروا في البحث خلال دقائق.` });
+  } catch (e) {
+    console.error('handleExportIngest failed:', (e && e.stack) || e);
+    await tg(env, 'sendMessage', { chat_id: chatId, text: '⚠️ الملف وصل لكن حصل خطأ تقني أثناء الأرشفة. تم إبلاغ المشرف وهيتحل قريب.' });
+  }
+}
+
 // ---------- Mini App initData validation ----------
 async function validateInitData(env, initData) {
   try {
