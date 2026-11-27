@@ -263,13 +263,21 @@ function tokenScore(nq, cand) {
     let best = 4;
     for (const c of cw) {
       const nc = norm(c);
-      if (!nc) continue;
-      if (nc.includes(w) || w.includes(nc)) { best = Math.min(best, Math.abs(nc.length - w.length) > 2 ? 0.5 : 0); continue; }
+      if (!nc || nc.length < 2) continue;
+      if (nc.length >= 3 && w.length >= 3 && (nc.includes(w) || w.includes(nc))) { best = Math.min(best, Math.abs(nc.length - w.length) > 2 ? 0.5 : 0); continue; }
       best = Math.min(best, editDist(w, nc, 3));
     }
     total += best;
   }
   return total / qw.length;
+}
+
+function prettyTitle(t) {
+  let x = String(t || '');
+  x = x.replace(/\.[a-z0-9]{2,5}$/i, '');
+  x = x.replace(/^[A-Za-z]{3,}\d{3,}[_\s-]+/, '');
+  x = x.replace(/[_{}]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return x || String(t || '');
 }
 
 async function suggestTitles(env, q, limit = 3) {
@@ -281,7 +289,7 @@ async function suggestTitles(env, q, limit = 3) {
   const scored = [];
   for (const r of rows.results || []) {
     const sc = Math.min(tokenScore(nq, r.title_norm || r.title), tokenScore(nq, norm(r.file_name || '')));
-    if (sc <= 1.2) scored.push({ id: r.id, title: r.title, sc });
+    if (sc <= 1.0) scored.push({ id: r.id, title: r.title, sc });
   }
   scored.sort((a, b) => a.sc - b.sc);
   const seen = new Set();
@@ -290,7 +298,7 @@ async function suggestTitles(env, q, limit = 3) {
     const k = norm(t.title);
     if (seen.has(k)) continue;
     seen.add(k);
-    out.push({ id: t.id, title: t.title });
+    out.push({ id: t.id, title: prettyTitle(t.title) });
     if (out.length >= limit) break;
   }
   return out;
