@@ -295,6 +295,7 @@ function tokenScore(nq, cand) {
       const nc = norm(c);
       if (!nc || nc.length < 2) continue;
       if (nc.length >= 3 && w.length >= 3 && (nc.includes(w) || w.includes(nc))) { best = Math.min(best, Math.abs(nc.length - w.length) > 2 ? 0.5 : 0); continue; }
+      if (nc[0] !== w[0]) continue; // cheap gate: edit distance only within same first letter
       best = Math.min(best, editDist(w, nc, 3));
     }
     total += best;
@@ -314,9 +315,9 @@ async function suggestTitles(env, q, limit = 3) {
   const nq = norm(q);
   if (!nq || nq.length < 3 || nq.length > 80) return [];
   const rows = await env.DB.prepare(
-    'SELECT id, title, title_norm, file_name FROM files ORDER BY id DESC LIMIT 3000'
+    'SELECT id, title, title_norm, file_name FROM files ORDER BY id DESC LIMIT 2500'
   ).all();
-  const qwords = nq.split(/\s+/).filter(x => x.length >= 2).slice(0, 8);
+  const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 6);
   if (!qwords.length) return [];
   const scored = [];
   for (const r of rows.results || []) {
@@ -644,7 +645,8 @@ async function handleUpdate(env, update) {
       const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
       await logSearch(env, from.id, text, items.length);
       if (!items.length) {
-        const sug = await suggestTitles(env, text, 3);
+        let sug = [];
+        try { sug = await suggestTitles(env, text, 3); } catch (e) {}
         const kb = sug.map(g => [{ text: `🔎 ${g.title.slice(0, 45)}`, callback_data: 'sq:' + g.id }]);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
@@ -974,7 +976,7 @@ async function handleApi(env, request, path) {
   }
 
   if (path === '/api/search' || path === '/api/latest') {
-    const q = (url.searchParams.get('q') || '').slice(0, 200);
+    const q = (url.searchParams.get('q') || '').slice(0, 120);
     const ext = url.searchParams.get('ext') || 'all';
     const off = parseInt(url.searchParams.get('off') || '0', 10) || 0;
     const perPage = parseInt(settings.per_page, 10) || 10;
@@ -984,7 +986,8 @@ async function handleApi(env, request, path) {
       await logSearch(env, u && u.id ? u.id : 0, q, items.length);
     }
     const counts = q ? await countExt(env, q) : null;
-    const suggestions = (q && !items.length) ? await suggestTitles(env, q, 3) : null;
+    let suggestions = null;
+    if (q && !items.length) { try { suggestions = await suggestTitles(env, q, 3); } catch (e) {} }
     return json({ items: items.map(publicFile), hasMore, counts, suggestions });
   }
 
