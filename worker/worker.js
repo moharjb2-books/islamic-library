@@ -111,7 +111,7 @@ function fmtSize(b) {
 // ---------- settings ----------
 const DEFAULTS = {
   welcome_on: '1',
-  per_page: '10',
+  per_page: '20',
   protect_content: '0',
   notify_new: '0',
   admin_ids: '',
@@ -604,7 +604,7 @@ async function handleUpdate(env, update) {
       // Plain search in chat
       const perPage = parseInt(settings.per_page, 10) || 10;
       const audioAsked = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(text);
-      const { items } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
+      const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
       await logSearch(env, from.id, text, items.length);
       if (!items.length) {
         const sug = await suggestTitles(env, text, 3);
@@ -624,10 +624,11 @@ async function handleUpdate(env, update) {
         }
         return [{ text: label, url: f.link }];
       });
+      if (hasMore) keyboard.push([{ text: 'عرض المزيد ⬇', callback_data: 'more:' + items.length }]);
       keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: env.MINIAPP_URL } }]);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
-        text: `🔍 نتائج البحث عن «${text}» — ${items.length}${items.length === perPage ? '+' : ''} نتيجة:`,
+        text: `🔍 نتائج البحث عن «${text}»${hasMore ? ' — الصفحة الأولى من ' + items.length : ' — ' + items.length}:`,
         reply_markup: { inline_keyboard: keyboard },
       });
       return;
@@ -704,6 +705,38 @@ async function handleUpdate(env, update) {
         await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '✅ تم التحقق، يمكنك الاستخدام الآن' });
         await tg(env, 'sendMessage', { chat_id: chatId, text: '✅ تم التحقق من اشتراكك. أرسل اسم الكتاب للبحث.' });
       }
+      return;
+    }
+    if (data.startsWith('more:')) {
+      const off = parseInt(data.slice(5), 10) || 0;
+      await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
+      const last = await env.DB.prepare(
+        'SELECT q FROM searches WHERE user_id = ? AND results > 0 ORDER BY id DESC LIMIT 1'
+      ).bind(cb.from.id).first();
+      if (!last || !last.q) {
+        await tg(env, 'sendMessage', { chat_id: chatId, text: 'أرسل كلمة البحث من جديد لمتابعة النتائج.' });
+        return;
+      }
+      const perPage3 = 20;
+      const audioAsked3 = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(last.q);
+      const { items, hasMore } = await searchFiles(env, last.q, 'all', off, perPage3, audioAsked3);
+      if (!items.length) {
+        await tg(env, 'sendMessage', { chat_id: chatId, text: 'انتهت النتائج ✅' });
+        return;
+      }
+      const missing = await checkForced(env, cb.from.id);
+      if (missing.length) return sendForced(env, chatId, missing);
+      const keyboard = items.map(f => {
+        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id }];
+        return [{ text: label, url: f.link }];
+      });
+      if (hasMore) keyboard.push([{ text: 'عرض المزيد ⬇', callback_data: 'more:' + (off + items.length) }]);
+      await tg(env, 'sendMessage', {
+        chat_id: chatId,
+        text: `🔍 «${last.q}» — نتائج ${off + 1} إلى ${off + items.length}:`,
+        reply_markup: { inline_keyboard: keyboard },
+      });
       return;
     }
     if (data.startsWith('sq:')) {
