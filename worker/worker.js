@@ -171,10 +171,131 @@ const DEFAULTS = {
   admin_ids: '',
 };
 async function getSettings(env) {
-  const rows = await env.DB.prepare('SELECT key, value FROM settings').all();
   const s = { ...DEFAULTS };
-  for (const r of rows.results || []) s[r.key] = r.value;
+  try {
+    const rows = await env.DB.prepare('SELECT key, value FROM settings').all();
+    for (const r of rows.results || []) s[r.key] = r.value;
+  } catch (e) { snapNote(); }
   return s;
+}
+
+// ---------- snapshot fallback (static search while D1 is unavailable) ----------
+// The Mini App repo (GitHub Pages) hosts a sharded snapshot built from a D1
+// export: an inverted index (idx/), row chunks (rows/) and an id map (byid/).
+// When a D1 read errors (e.g. the daily free read cap), snapOn flips and
+// search/latest/stats/delivery keep working from the snapshot until D1
+// recovers; every request retries D1 first whenever snapOn did not trip yet.
+let snapOn = false;
+function snapNote() { snapOn = true; }
+let SNAP_BASE = 'https://moharjb2-books.github.io/islamic-library/snapshot';
+let snapMetaCache = { at: 0, meta: null };
+
+async function snapGet(path) {
+  const r = await fetch(SNAP_BASE + path, { cf: { cacheEverything: true, cacheTtl: 300 } });
+  if (!r.ok) throw new Error('snapshot ' + r.status + ' ' + path);
+  return r.json();
+}
+async function snapMeta() {
+  if (snapMetaCache.meta && Date.now() - snapMetaCache.at < 300000) return snapMetaCache.meta;
+  const meta = await snapGet('/meta.json');
+  snapMetaCache = { at: Date.now(), meta };
+  return meta;
+}
+function snapRowFile(r) {
+  return { id: r[0], title: r[1], file_name: r[2], author: r[3], ext: r[4], size_bytes: r[5],
+           channel: r[6], message_id: r[7], link: r[8], file_id: r[9], delivery: r[10], created_at: r[11] };
+}
+function extFilterOk(e, ext, includeAudio) {
+  e = String(e || '').toLowerCase();
+  const aud = isAudioExt(e);
+  if (ext && ext !== 'all') return ext === 'audio' ? aud : e === ext.toLowerCase();
+  return includeAudio || !aud;
+}
+async function snapPostings(word) {
+  const shard = await snapGet('/idx/' + encodeURIComponent(word.slice(0, 2)) + '.json');
+  if (shard[word]) return shard[word];
+  const out = [];
+  for (const k of Object.keys(shard)) {
+    if (k.startsWith(word)) {
+      for (const i of shard[k]) { out.push(i); if (out.length >= 20000) break; }
+    }
+    if (out.length >= 20000) break;
+  }
+  out.sort((a, b) => a - b);
+  return out;
+}
+async function snapSearch(q, ext, offset, limit, includeAudio) {
+  const nq = norm(q);
+  const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
+  if (!words.length) {
+    const latest = await snapGet('/latest.json');
+    const rows = (latest.items || []).map(snapRowFile).filter(f => extFilterOk(f.ext, ext, includeAudio));
+    return { items: rows.slice(offset, offset + limit), hasMore: offset + limit < rows.length };
+  }
+  const lists = (await Promise.all(words.map(snapPostings))).filter(l => l.length);
+  if (lists.length < words.length) return { items: [], hasMore: false };
+  lists.sort((a, b) => a.length - b.length);
+  let cand = lists[0];
+  for (let i = 1; i < lists.length && cand.length; i++) {
+    const s = new Set(lists[i]);
+    cand = cand.filter(x => s.has(x));
+  }
+  const items = [];
+  const chunks = {};
+  let pos = cand.length - 1, matched = 0, scanned = 0;
+  while (pos >= 0 && items.length < limit + 1 && scanned < 6000) {
+    const g = cand[pos--]; scanned++;
+    const ci = Math.floor(g / 500);
+    if (!chunks[ci]) {
+      if (Object.keys(chunks).length >= 8) break;
+      chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json');
+    }
+    const r = chunks[ci][g % 500];
+    if (!r) continue;
+    if (!extFilterOk(r[4], ext, includeAudio)) continue;
+    if (matched++ < offset) continue;
+    items.push(snapRowFile(r));
+  }
+  const hasMore = items.length > limit;
+  return { items: items.slice(0, limit), hasMore };
+}
+async function snapGetFileById(id) {
+  const lst = await snapGet('/byid/b' + (id % 64) + '.json');
+  let g = -1;
+  for (const pair of lst) { if (pair[0] === id) { g = pair[1]; break; } }
+  if (g < 0) return null;
+  const chunk = await snapGet('/rows/c' + String(Math.floor(g / 500)).padStart(3, '0') + '.json');
+  const r = chunk[g % 500];
+  return r ? snapRowFile(r) : null;
+}
+async function snapSuggest(q, limit) {
+  const nq = norm(q);
+  const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 6);
+  if (!qwords.length) return [];
+  const mainW = qwords.slice().sort((a, b) => b.length - a.length)[0].slice(0, 20);
+  let shard;
+  try { shard = await snapGet('/idx/' + encodeURIComponent(mainW.slice(0, 2)) + '.json'); }
+  catch (e) { return []; }
+  const scored = [];
+  let budget = 2000;
+  for (const k of Object.keys(shard)) {
+    if (k.length < 3) continue;
+    if (k.includes(mainW) || mainW.includes(k)) { scored.push([Math.abs(k.length - mainW.length) > 2 ? 1 : 0, k]); continue; }
+    if (k[0] !== mainW[0] || Math.abs(k.length - mainW.length) > 3) continue;
+    if (budget-- <= 0) break;
+    scored.push([editDist(mainW, k, 3), k]);
+  }
+  scored.sort((a, b) => a[0] - b[0] || a[1].length - b[1].length);
+  const out = [];
+  for (const s of scored) { if (s[0] > 2) break; out.push(s[1]); if (out.length >= limit) break; }
+  return out;
+}
+async function getFileById(env, id) {
+  if (!snapOn) {
+    try { return await env.DB.prepare('SELECT * FROM files WHERE id = ?').bind(id).first(); }
+    catch (e) { snapNote(); }
+  }
+  return snapGetFileById(id);
 }
 async function setSetting(env, key, value) {
   await env.DB.prepare(
@@ -252,7 +373,7 @@ const AUDIO_EXT_LIST = ['mp3','m4a','ogg','oga','opus','wav','aac','flac','weba'
 const AUDIO_EXTS = "('" + AUDIO_EXT_LIST.join("','") + "')";
 function isAudioExt(e) { return AUDIO_EXT_LIST.includes(String(e || '').toLowerCase()); }
 
-async function searchFiles(env, q, ext, offset, limit, includeAudio) {
+async function searchFilesDB(env, q, ext, offset, limit, includeAudio) {
   const nq = norm(q);
   const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
   let from = 'files f';
@@ -288,7 +409,7 @@ async function searchFiles(env, q, ext, offset, limit, includeAudio) {
   return { items: items.slice(0, limit), hasMore };
 }
 
-async function countExt(env, q) {
+async function countExtDB(env, q) {
   const nq = norm(q);
   const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
   let from = 'files f';
@@ -310,6 +431,22 @@ async function countExt(env, q) {
   for (const r of rows.results || []) { out[r.k || 'other'] = r.c; total += r.c; }
   out.all = total - (out.audio || 0);
   return out;
+}
+
+
+// Fallback-aware wrappers: try D1 first, flip to the static snapshot on error.
+async function searchFiles(env, q, ext, offset, limit, includeAudio) {
+  if (snapOn) { try { return await snapSearch(q, ext, offset, limit, includeAudio); } catch (e) {} }
+  try { return await searchFilesDB(env, q, ext, offset, limit, includeAudio); }
+  catch (e) { snapNote(); return await snapSearch(q, ext, offset, limit, includeAudio); }
+}
+async function countExt(env, q) {
+  if (snapOn) return null;
+  try { return await countExtDB(env, q); } catch (e) { snapNote(); return null; }
+}
+async function suggestTitles(env, q, limit = 5) {
+  if (!snapOn) { try { return await suggestTitlesDB(env, q, limit); } catch (e) { snapNote(); } }
+  return snapSuggest(q, limit);
 }
 
 // ---------- fuzzy suggestions ----------
@@ -356,7 +493,7 @@ function prettyTitle(t) {
   return x || String(t || '');
 }
 
-async function suggestTitles(env, q, limit = 3) {
+async function suggestTitlesDB(env, q, limit = 3) {
   const nq = norm(q);
   if (!nq || nq.length < 3 || nq.length > 80) return [];
   const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 6);
@@ -680,7 +817,7 @@ async function handleUpdate(env, update) {
       // Deep link delivery: /start dl_<id>
       if (param.startsWith('dl_')) {
         const id = parseInt(param.slice(3), 10);
-        const file = await env.DB.prepare('SELECT * FROM files WHERE id = ?').bind(id).first();
+        const file = await getFileById(env, id);
         if (file) return deliverFile(env, settings, chatId, file);
       }
       return sendWelcome(env, settings, chatId);
@@ -909,7 +1046,7 @@ async function handleUpdate(env, update) {
     }
     if (data.startsWith('dl:')) {
       const id = parseInt(data.slice(3), 10);
-      const file = await env.DB.prepare('SELECT * FROM files WHERE id = ?').bind(id).first();
+      const file = await getFileById(env, id);
       if (!file) {
         await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'الملف لم يعد متاحًا', show_alert: true });
         return;
@@ -1071,9 +1208,15 @@ async function handleApi(env, request, path) {
   const settings = await getSettings(env);
 
   if (path === '/api/stats') {
-    const files = await env.DB.prepare('SELECT COUNT(*) AS c FROM files').first();
-    const channels = await env.DB.prepare('SELECT COUNT(*) AS c FROM channels WHERE active = 1').first();
-    return json({ files: files.c || 0, channels: channels.c || 0 });
+    if (!snapOn) {
+      try {
+        const files = await env.DB.prepare('SELECT COUNT(*) AS c FROM files').first();
+        const channels = await env.DB.prepare('SELECT COUNT(*) AS c FROM channels WHERE active = 1').first();
+        return json({ files: files.c || 0, channels: channels.c || 0 });
+      } catch (e) { snapNote(); }
+    }
+    const meta = await snapMeta();
+    return json({ files: meta.files || 0, channels: meta.channels || 0, snapshot: true });
   }
 
   if (path === '/api/search' || path === '/api/latest') {
@@ -1095,8 +1238,9 @@ async function handleApi(env, request, path) {
   if (path === '/api/me') {
     const user = await apiUser(env, request);
     if (!user) return json({ error: 'unauthorized' }, 401);
-    await trackUser(env, user);
-    const admin = await isAdmin(env, settings, user.id);
+    try { await trackUser(env, user); } catch (e) { snapNote(); }
+    let admin = false;
+    try { admin = await isAdmin(env, settings, user.id); } catch (e) { snapNote(); }
     return json({ user_id: user.id, is_admin: admin, is_owner: isOwner(env, user.id) });
   }
 
@@ -1117,11 +1261,13 @@ async function handleApi(env, request, path) {
   if (path === '/api/favs') {
     const user = await apiUser(env, request);
     if (!user) return json({ error: 'unauthorized' }, 401);
-    const rows = await env.DB.prepare(
-      `SELECT f.* FROM favorites v JOIN files f ON f.id = v.file_id
-       WHERE v.user_id = ? ORDER BY v.created_at DESC LIMIT 50`
-    ).bind(user.id).all();
-    return json({ items: (rows.results || []).map(publicFile) });
+    try {
+      const rows = await env.DB.prepare(
+        `SELECT f.* FROM favorites v JOIN files f ON f.id = v.file_id
+         WHERE v.user_id = ? ORDER BY v.created_at DESC LIMIT 50`
+      ).bind(user.id).all();
+      return json({ items: (rows.results || []).map(publicFile) });
+    } catch (e) { snapNote(); return json({ items: [] }); }
   }
 
   // ---- admin ----
@@ -1366,7 +1512,8 @@ export default {
 };
 
 async function handleFetch(request, env, ctx) {
-    await migrate(env);
+    if (env.SNAPSHOT_BASE) SNAP_BASE = env.SNAPSHOT_BASE;
+    try { await migrate(env); } catch (e) { snapNote(); }
     const url = new URL(request.url);
     const path = url.pathname;
 
