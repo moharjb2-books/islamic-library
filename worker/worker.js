@@ -896,7 +896,7 @@ async function handleUpdate(env, update, ctx2) {
         await tg(env, 'sendMessage', {
           chat_id: chatId,
           text: '🛠 لوحة التحكم:',
-          reply_markup: { inline_keyboard: [[{ text: 'فتح لوحة التحكم', web_app: { url: env.MINIAPP_URL + '?admin=1' } }]] },
+          reply_markup: { inline_keyboard: [[{ text: '🛠 فتح لوحة التحكم', web_app: { url: env.MINIAPP_URL + '?admin=1' }, style: 'primary' }]] },
         });
       } else {
         await tg(env, 'sendMessage', { chat_id: chatId, text: 'هذه المنطقة للمشرف فقط.' });
@@ -914,7 +914,7 @@ async function handleUpdate(env, update, ctx2) {
       if (!items.length) {
         let sug = [];
         try { sug = await suggestTitles(env, text, 3); } catch (e) {}
-        const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: `🔎 ${String(g.title).slice(0, 45)}`, callback_data: 'sq:' + g.id }]);
+        const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: `🔎 ${String(g.title).slice(0, 45)}`, callback_data: 'sq:' + g.id, style: 'primary' }]);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
           text: `🔍 لم أجد نتائج مطابقة لـ«${text}».` + (sug.length ? '\n\nهل تقصد:' : '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.'),
@@ -925,12 +925,12 @@ async function handleUpdate(env, update, ctx2) {
       const keyboard = items.map(f => {
         const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') {
-          return [{ text: label, callback_data: 'dl:' + f.id }];
+          return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary' }];
         }
-        return [{ text: label, url: f.link }];
+        return [{ text: label, url: f.link, style: 'primary' }];
       });
-      if (hasMore) keyboard.push([{ text: 'عرض المزيد ⬇', callback_data: 'more:' + items.length }]);
-      keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: env.MINIAPP_URL } }]);
+      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + items.length, style: 'primary' }]);
+      keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success' }]);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
         text: `🔍 نتائج البحث عن «${text}»${hasMore ? ' — الصفحة الأولى من ' + items.length : ' — ' + items.length}:`,
@@ -970,8 +970,8 @@ async function handleUpdate(env, update, ctx2) {
       }
       const keyboard = items.map(f => {
         const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
-        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id }];
-        return [{ text: label, url: f.link }];
+        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary' }];
+        return [{ text: label, url: f.link, style: 'primary' }];
       });
       await tg(env, 'sendMessage', { chat_id: chatId, text: '📚 أحدث الإضافات:', reply_markup: { inline_keyboard: keyboard } });
       return;
@@ -991,10 +991,10 @@ async function handleUpdate(env, update, ctx2) {
       }
       const keyboard = items.map(f => {
         const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
-        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id }];
-        return [{ text: label, url: f.link }];
+        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary' }];
+        return [{ text: label, url: f.link, style: 'primary' }];
       });
-      await tg(env, 'sendMessage', { chat_id: chatId, text: '☆ المفضلة:', reply_markup: { inline_keyboard: keyboard } });
+      await tg(env, 'sendMessage', { chat_id: chatId, text: '⭐ المفضلة:', reply_markup: { inline_keyboard: keyboard } });
       return;
     }
     if (data.startsWith('bc_go:') || data.startsWith('bc_no:')) {
@@ -1045,10 +1045,10 @@ async function handleUpdate(env, update, ctx2) {
       }
       const keyboard = items.map(f => {
         const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
-        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id }];
-        return [{ text: label, url: f.link }];
+        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary' }];
+        return [{ text: label, url: f.link, style: 'primary' }];
       });
-      if (hasMore) keyboard.push([{ text: 'عرض المزيد ⬇', callback_data: 'more:' + (off + items.length) }]);
+      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + (off + items.length), style: 'primary' }]);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
         text: `🔍 «${last.q}» — نتائج ${off + 1} إلى ${off + items.length}:`,
@@ -1092,8 +1092,8 @@ async function handleUpdate(env, update, ctx2) {
 }
 
 async function sendForced(env, chatId, missing) {
-  const buttons = missing.map(u => [{ text: `📢 اشترك: @${u}`, url: `https://t.me/${u}` }]);
-  buttons.push([{ text: '✅ اشتركت، تحقق', callback_data: 'recheck' }]);
+  const buttons = missing.map(u => [{ text: `📢 اشترك: @${u}`, url: `https://t.me/${u}`, style: 'primary' }]);
+  buttons.push([{ text: '✅ اشتركت، تحقق', callback_data: 'recheck', style: 'success' }]);
   await tg(env, 'sendMessage', {
     chat_id: chatId,
     text: '⚠️ لاستخدام المكتبة، اشترك في القنوات التالية ثم اضغط «اشتركت، تحقق»:',
