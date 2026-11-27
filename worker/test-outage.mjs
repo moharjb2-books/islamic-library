@@ -155,7 +155,7 @@ check('bot search returns snapshot results with D1 dead', Boolean(resMsg && JSON
   check('has-results shows external sources inline (aljam3 + archive.org + ketabonline)', mk.includes('hf.co/riyad.pdf') && mk.includes('/download/tafsir-ibn-kathir-01/') && mk.includes('ketabonline.com/ar/books/2422'), mk.slice(0, 300));
   const lbls = [...mk.matchAll(/"text":"([^"]+)"/g)].map(x => x[1]);
   check('has-results labels are clean (no underscores / raw extensions)', lbls.length > 0 && lbls.every(l => !/\.(pdf|epub|docx)/i.test(l) && !/\w_\w/.test(l)), JSON.stringify(lbls).slice(0, 300));
-  check('has-results text is one short count line, no per-source headers', /نتائج البحث/.test(tx) && !tx.includes('من الجامع') && !tx.includes('archive.org') && !tx.includes('قناتك أولًا'), tx.slice(0, 200));
+  check('has-results reply is cards only (no header text at all)', tx === '📚', tx.slice(0, 200));
   check('external rows look like channel rows (uniform 📕 labels)', lbls.filter(l => l.startsWith('📕')).length >= 4, JSON.stringify(lbls).slice(0, 300));
 }
 // local duplicate rows collapse to one (largest copy kept)

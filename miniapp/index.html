@@ -472,8 +472,8 @@ function resultsHtml() {
       + (extList ? `<div class="list" style="margin-top:10px">${extList}</div>` : '')
       + extLinksHtml(state.q) + `</div>`;
   }
-  const head = state.q ? `<div class="sec-head"><h2>نتائج البحث</h2></div>`
-    : (state.tab === 'search' ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '');
+  // Cards only in search results: no heading above the list.
+  const head = (!state.q && state.tab === 'search') ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '';
   // External books merge into the same list right after the channel books:
   // no section headers, and the "load more" button stays below everything.
   const extList = state.q ? extCardsHtml() : '';
@@ -523,7 +523,7 @@ function render() {
     body += `<div class="stats">
       <div><b>24/7</b><span>متاح دائمًا</span></div>
       <div><b>+${state.stats.files.toLocaleString('ar-EG')}</b><span>ملف جاهز للتحميل</span></div>
-    </div><div class="hint" style="text-align:center;opacity:.5;margin-top:6px">v20261127c</div>`;
+    </div><div class="hint" style="text-align:center;opacity:.5;margin-top:6px">v20261127d</div>`;
   }
   app.innerHTML = headerHtml(title, sub) + body + navHtml();
 }
@@ -534,7 +534,7 @@ function renderSettings() {
     <div class="panel"><h2>حول المكتبة</h2>
       <div class="hint">المكتبة الإسلامية الشاملة — ابحث باسم الكتاب أو المؤلف ويصلك الملف فورًا.
       يمكنك أيضًا إعادة توجيه أي ملف إلى البوت ليُضاف إلى المكتبة.</div>
-      <div class="hint" style="margin-top:8px;opacity:.6">الإصدار v20261127c</div>
+      <div class="hint" style="margin-top:8px;opacity:.6">الإصدار v20261127d</div>
     </div>
     <div class="panel"><h2>اختصارات</h2>
       <div class="ch-row"><span>📢 القناة الرئيسية</span><button class="btn" onclick="openChannel()">فتح</button></div>

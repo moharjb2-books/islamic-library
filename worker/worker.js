@@ -5,7 +5,7 @@
 // ADMIN_SETUP_CODE. Vars: MINIAPP_URL, BOT_USERNAME, MAIN_CHANNEL.
 // Bump on every Mini App change: Telegram's WebView caches pages per URL,
 // so the web_app links carry ?v= to force a fresh load after each deploy.
-const APP_VERSION = '20261127c';
+const APP_VERSION = '20261127d';
 function miniUrl(env, extra) {
   return env.MINIAPP_URL + '?v=' + APP_VERSION + (extra ? '&' + extra : '');
 }
@@ -1210,9 +1210,10 @@ async function handleUpdate(env, update, ctx2) {
       keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: miniUrl(env) }, style: 'success', icon_custom_emoji_id: ICON.search }]);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
-        // One short count line; no per-source headers. The buttons are one
+        // Cards only: no header line, no per-source headers. Telegram needs
+        // non-empty text, so it is a single neutral emoji. The buttons are one
         // ordered list: his channel, other channels, aljam3, archive.org, ketabonline.
-        text: `🔍 نتائج البحث عن «${text}» — ${local.length + aj.length + ext.length + kbk.length}${hasMore ? '+' : ''}`,
+        text: '📚',
         reply_markup: { inline_keyboard: keyboard },
       });
       return;
