@@ -231,9 +231,12 @@ async function searchFiles(env, q, ext, offset, limit, includeAudio) {
   const nq = norm(q);
   let where = '1=1';
   const binds = [];
-  if (nq) {
+  // D1 limits LIKE patterns to 50 bytes; Arabic chars are 2 bytes, so match
+  // word-by-word (each clamped) instead of one long phrase pattern.
+  const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
+  for (const w of words) {
     where += ' AND (title_norm LIKE ? OR author_norm LIKE ?)';
-    binds.push(`%${nq}%`, `%${nq}%`);
+    binds.push(`%${w}%`, `%${w}%`);
   }
   if (ext && ext !== 'all') {
     if (ext === 'audio') { where += ` AND ext IN ${AUDIO_EXTS}`; }
@@ -255,7 +258,8 @@ async function countExt(env, q) {
   const nq = norm(q);
   let where = '1=1';
   const binds = [];
-  if (nq) { where += ' AND (title_norm LIKE ? OR author_norm LIKE ?)'; binds.push(`%${nq}%`, `%${nq}%`); }
+  const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
+  for (const w of words) { where += ' AND (title_norm LIKE ? OR author_norm LIKE ?)'; binds.push(`%${w}%`, `%${w}%`); }
   const rows = await env.DB.prepare(
     `SELECT CASE WHEN ext IN ${AUDIO_EXTS} THEN 'audio' ELSE ext END AS k, COUNT(*) AS c
      FROM files WHERE ${where} GROUP BY k`
@@ -317,7 +321,7 @@ async function suggestTitles(env, q, limit = 3) {
   const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 6);
   if (!qwords.length) return [];
   // SQL-side candidate pull: D1 scans, the worker only scores a bounded set.
-  const mainW = qwords.slice().sort((a, b) => b.length - a.length)[0];
+  const mainW = qwords.slice().sort((a, b) => b.length - a.length)[0].slice(0, 20);
   const prefix = mainW.slice(0, 4);
   const rows = await env.DB.prepare(
     `SELECT id, title, title_norm, file_name FROM files
