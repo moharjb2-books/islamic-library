@@ -503,6 +503,54 @@ async function iaSearch(env, q, limit = 3) {
   } catch (e) { return []; } finally { clearTimeout(t); }
 }
 
+// aljam3.com (الجامع): free open API, ~63k Sunni-curated books. Search has no
+// files; a bounded detail call per hit resolves direct PDF/DOCX/TXT links.
+const ajCache = new Map();
+async function ajSearch(env, q, limit = 3) {
+  const key = (q || '').toLowerCase().trim();
+  if (!key) return [];
+  const hit = ajCache.get(key);
+  if (hit && Date.now() - hit.at < 600000) return hit.items;
+  const base = env.AJ_API_BASE || 'https://aljam3.com';
+  const strip = (s) => String(s || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  const ua = { 'user-agent': 'IslamicLibraryBot/1.0 (+https://t.me/ISLAMIC_BOOKS_LIBbot)' };
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 2000);
+  try {
+    const u = new URL(base + '/api/v1/books');
+    u.searchParams.set('q', q);
+    u.searchParams.set('limit', String(limit));
+    const r = await fetch(u.toString(), { signal: ctrl.signal, headers: ua });
+    const j = await r.json();
+    const books = ((j && j.books) || []).slice(0, limit).filter(b => b && b.id);
+    const items = await Promise.all(books.map(async (b) => {
+      const author = strip(b.author && b.author.name);
+      const title = strip(b.title).slice(0, 24) + (author ? ' · ' + author.slice(0, 12) : '');
+      let pdf = null, alt = null, altKind = '';
+      try {
+        const c2 = new AbortController();
+        const t2 = setTimeout(() => c2.abort(), 2000);
+        try {
+          const dres = await fetch(`${base}/api/v1/books/${b.id}?expand[]=files`, { signal: c2.signal, headers: ua });
+          const d = await dres.json();
+          const f0 = (d.files || [])[0];
+          if (f0 && f0.urls) {
+            pdf = f0.urls.pdf || null;
+            if (f0.urls.docx) { alt = f0.urls.docx; altKind = 'DOCX'; }
+            else if (f0.urls.txt) { alt = f0.urls.txt; altKind = 'TXT'; }
+          }
+        } finally { clearTimeout(t2); }
+      } catch (e) {}
+      if (!pdf && !alt) return null;
+      return { title, url: pdf || alt, alt: pdf ? alt : null, altKind, lib: strip(b.library && b.library.name) };
+    }));
+    const out = items.filter(Boolean);
+    ajCache.set(key, { at: Date.now(), items: out });
+    if (ajCache.size > 500) ajCache.clear();
+    return out;
+  } catch (e) { return []; } finally { clearTimeout(t); }
+}
+
 // ketabonline.com: free open API, Shamela-based Sunni library. One search
 // call returns title/authors/files; some books carry a direct PDF zip.
 const kbCache = new Map();
@@ -1038,12 +1086,18 @@ async function handleUpdate(env, update, ctx2) {
       const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
       defer(ctx2, logSearch(env, from.id, text, items.length));
       if (!items.length) {
-        const [sug, ext, kbk] = await Promise.all([
+        const [sug, aj, ext, kbk] = await Promise.all([
           suggestTitles(env, text, 3).catch(() => []),
+          ajSearch(env, text, 3),
           iaSearch(env, text, 3),
           kbSearch(env, text, 3),
         ]);
         const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: `🔎 ${String(g.title).slice(0, 45)}`, callback_data: 'sq:' + g.id, style: 'primary', icon_custom_emoji_id: ICON.search }]);
+        for (const a of aj) {
+          const row = [{ text: `📘 ${a.title}`, url: a.url, style: 'success' }];
+          if (a.alt) row.push({ text: `⬇️ ${a.altKind}`, url: a.alt, style: 'primary' });
+          kb.push(row);
+        }
         for (const e of ext) kb.push([{ text: `🌐 ${e.title}`, url: e.url, style: 'primary' }]);
         for (const k of kbk) {
           const row = [{ text: `📗 ${k.title}`, url: k.url, style: 'primary' }];
@@ -1055,6 +1109,7 @@ async function handleUpdate(env, update, ctx2) {
           chat_id: chatId,
           text: `🔍 لم أجد نتائج مطابقة لـ«${text}».`
             + (sug.length ? '\n\nهل تقصد:' : '')
+            + (aj.length ? '\n\n📘 من الجامع aljam3.com (تحميل مباشر):' : '')
             + (ext.length ? '\n\n🌐 تحميل مباشر من archive.org:' : '')
             + (kbk.length ? '\n\n📗 من موقع كتاب أونلاين (اقرأ أو حمّل):' : '')
             + '\n\n🔗 أو ابحث في مكتبات سنّية موثوقة:'
@@ -1412,13 +1467,15 @@ async function handleApi(env, request, path, ctx2) {
     let suggestions = null;
     let external = null;
     if (q && !items.length) {
-      const [sug2, ext2, kb2] = await Promise.all([
+      const [sug2, aj2, ext2, kb2] = await Promise.all([
         suggestTitles(env, q, 3).catch(() => []),
+        ajSearch(env, q, 3).catch(() => []),
         iaSearch(env, q, 3).catch(() => []),
         kbSearch(env, q, 3).catch(() => []),
       ]);
       suggestions = sug2;
-      external = (ext2 || []).map(e2 => ({ ...e2, src: 'ia' }))
+      external = (aj2 || []).map(a2 => ({ title: a2.title, url: a2.url, src: 'aj' }))
+        .concat((ext2 || []).map(e2 => ({ ...e2, src: 'ia' })))
         .concat((kb2 || []).map(k2 => ({ title: k2.title, url: k2.pdf || k2.url, src: 'kb' })));
     }
     return json({ items: items.map(publicFile), hasMore, counts, suggestions, external });

@@ -445,13 +445,16 @@ function resultsHtml() {
       : '<br>جرّب اسمًا أقصر أو جزءًا منه.';
     const ext = state.external || [];
     const extBtn = (e2, ic) => `<button onclick="openExtLib('${String(e2.url).replace(/'/g, '%27')}')">${ic} ${String(e2.title).replace(/</g, '&lt;')}</button>`;
+    const ajHtml = ext.some(e2 => e2.src === 'aj')
+      ? `<div class="sug"><div class="sug-lbl">📘 من الجامع aljam3.com (تحميل مباشر):</div>`
+        + ext.filter(e2 => e2.src === 'aj').map(e2 => extBtn(e2, '📘')).join('') + `</div>` : '';
     const iaHtml = ext.some(e2 => e2.src === 'ia')
       ? `<div class="sug"><div class="sug-lbl">🌐 تحميل مباشر من archive.org:</div>`
         + ext.filter(e2 => e2.src === 'ia').map(e2 => extBtn(e2, '⬇️')).join('') + `</div>` : '';
     const kbHtml = ext.some(e2 => e2.src === 'kb')
       ? `<div class="sug"><div class="sug-lbl">📗 من موقع كتاب أونلاين:</div>`
         + ext.filter(e2 => e2.src === 'kb').map(e2 => extBtn(e2, '📗')).join('') + `</div>` : '';
-    return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.` + sugHtml + iaHtml + kbHtml + extLinksHtml(state.q) + `</div>`;
+    return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.` + sugHtml + ajHtml + iaHtml + kbHtml + extLinksHtml(state.q) + `</div>`;
   }
   const head = state.q ? `<div class="sec-head"><h2>نتائج البحث</h2></div>`
     : (state.tab === 'search' ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '');

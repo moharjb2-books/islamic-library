@@ -68,6 +68,23 @@ const kbServer = http.createServer((req, res) => {
 });
 await new Promise(r => kbServer.listen(8794, r));
 
+// ---- mock aljam3 API ----
+const ajServer = http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  const u = new URL(req.url, 'http://x');
+  if (u.pathname === '/api/v1/books') {
+    return res.end(JSON.stringify({ books: [
+      { id: 101, title: '<mark>رياض&nbsp;</mark>الصالحين - النووي', author: { id: 1, name: 'النووي' }, library: { id: 3, name: 'المكتبة الشاملة الوقفية' } },
+      { id: 102, title: 'كتاب بلا ملفات', author: { id: 2, name: 'مؤلف' }, library: { id: 3, name: 'الوقفية' } },
+    ] }));
+  }
+  if (u.pathname === '/api/v1/books/101') {
+    return res.end(JSON.stringify({ files: [{ id: 1, urls: { pdf: 'https://hf.co/riyad.pdf', docx: 'https://hf.co/riyad.docx' } }] }));
+  }
+  return res.end(JSON.stringify({ files: [] }));
+});
+await new Promise(r => ajServer.listen(8795, r));
+
 // ---- D1 that is down for everything ----
 const deadStmt = {
   bind() { return this; },
@@ -94,6 +111,7 @@ const env = {
   SNAPSHOT_BASE: 'http://127.0.0.1:8792',
   IA_API_BASE: 'http://127.0.0.1:8793',
   KB_API_BASE: 'http://127.0.0.1:8794',
+  AJ_API_BASE: 'http://127.0.0.1:8795',
 };
 
 let pass = 0, fail = 0;
@@ -281,6 +299,7 @@ for (const [p, b] of [
   check('IA item without files falls back to its details page', mk.includes('/details/another-book-02'), mk.slice(0, 300));
   check('not-found offers Sunni external-library search links', mk.includes('shamela.ws/search?q=') && mk.includes('waqfeya.net/search?q=') && mk.includes('dorar.net/site/search?skeys=') && mk.includes('islamhouse.com/ar/search/'), mk.slice(0, 300));
   check('not-found offers ketabonline reader + direct PDF, free+Arabic only, tags stripped', mk.includes('ketabonline.com/ar/books/2422') && mk.includes('2422.pdf.zip') && mk.includes('ketabonline.com/ar/books/6572') && !mk.includes('9999') && !mk.includes('8888') && !mk.includes('<em>') && mk.includes('سامي محمد'), mk.slice(0, 400));
+  check('not-found offers aljam3 first with direct PDF + DOCX, tags stripped, empty-file book dropped', mk.includes('hf.co/riyad.pdf') && mk.includes('hf.co/riyad.docx') && !mk.includes('<mark>') && !mk.includes('بلا ملفات') && (m.body.text || '').indexOf('الجامع') > -1 && (m.body.text || '').indexOf('الجامع') < (m.body.text || '').indexOf('archive.org'), JSON.stringify(m && m.body).slice(0, 400));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
