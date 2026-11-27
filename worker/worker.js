@@ -314,21 +314,39 @@ function prettyTitle(t) {
 async function suggestTitles(env, q, limit = 3) {
   const nq = norm(q);
   if (!nq || nq.length < 3 || nq.length > 80) return [];
-  const rows = await env.DB.prepare(
-    'SELECT id, title, title_norm, file_name FROM files ORDER BY id DESC LIMIT 2500'
-  ).all();
   const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 6);
   if (!qwords.length) return [];
-  // prefilter on the longest (rarest) query word only, then cap scored candidates
+  // SQL-side candidate pull: D1 scans, the worker only scores a bounded set.
   const mainW = qwords.slice().sort((a, b) => b.length - a.length)[0];
+  const prefix = mainW.slice(0, 4);
+  const rows = await env.DB.prepare(
+    `SELECT id, title, title_norm, file_name FROM files
+     WHERE title_norm LIKE ? OR title_norm LIKE ?
+     ORDER BY id DESC LIMIT 150`
+  ).bind(`%${mainW}%`, `%${prefix}%`).all();
+  // score in JS with tokens normed once per candidate, and a global editDist budget
+  let distBudget = 2500;
   const scored = [];
   for (const r of rows.results || []) {
-    if (scored.length > 0 && scored.length >= 400) break;
-    const hay = (r.title_norm || '') + ' ' + norm(r.file_name || '');
-    const ctoks = hay.split(/[\s_\-–—.,()]+/).filter(t => t.length >= 2);
-    const hit = ctoks.some(t => t.includes(mainW) || mainW.includes(t) || (mainW.length >= 4 && t.length >= 4 && t.slice(0, 4) === mainW.slice(0, 4)));
-    if (!hit) continue;
-    const sc = Math.min(tokenScore(nq, r.title_norm || r.title), tokenScore(nq, norm(r.file_name || '')));
+    const candTokens = ((r.title_norm || '') + ' ' + norm(r.file_name || ''))
+      .split(/[\s_\-\u2013\u2014.,()]+/).filter(t => t.length >= 2).slice(0, 40);
+    if (!candTokens.length) continue;
+    let total = 0;
+    for (const w of qwords) {
+      let best = 4;
+      for (const nc of candTokens) {
+        if (nc.length >= 3 && w.length >= 3 && (nc.includes(w) || w.includes(nc))) {
+          best = Math.min(best, Math.abs(nc.length - w.length) > 2 ? 0.5 : 0); continue;
+        }
+        if (nc[0] !== w[0] || Math.abs(nc.length - w.length) > 3) continue;
+        if (distBudget <= 0) continue;
+        distBudget--;
+        best = Math.min(best, editDist(w, nc, 3));
+        if (best === 0) break;
+      }
+      total += best;
+    }
+    const sc = total / qwords.length;
     if (sc <= 1.0) scored.push({ id: r.id, title: r.title, sc });
   }
   scored.sort((a, b) => a.sc - b.sc);
