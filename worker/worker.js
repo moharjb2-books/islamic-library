@@ -84,6 +84,7 @@ async function migrate(env) {
   try { await env.DB.prepare('ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0').run(); } catch (e) {}
   try { await env.DB.prepare("ALTER TABLE files ADD COLUMN file_name TEXT DEFAULT ''").run(); } catch (e) {}
   try { await env.DB.prepare('ALTER TABLE channels ADD COLUMN backfill_cursor INTEGER DEFAULT 0').run(); } catch (e) {}
+  try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS export_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, channel TEXT NOT NULL, status TEXT DEFAULT 'pending', note TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), done_at TEXT DEFAULT '')").run(); } catch (e) {}
   migrated = true;
 }
 
@@ -304,6 +305,101 @@ async function suggestTitles(env, q, limit = 3) {
   return out;
 }
 
+// ---------- Telegram Desktop export ingest (owner only) ----------
+function exportText(t) {
+  if (!t) return '';
+  if (typeof t === 'string') return t.trim();
+  if (Array.isArray(t)) return t.map(p => (typeof p === 'string' ? p : (p && p.text) || '')).join('').trim();
+  return '';
+}
+
+function exportSize(m2) {
+  let sz = Number(m2.file_size) || 0;
+  if (!sz && typeof m2.file === 'string') {
+    const sm = /\(([\d.,]+)\s*(B|KB|MB|GB)\)/i.exec(m2.file);
+    if (sm) sz = Math.round(parseFloat(sm[1].replace(',', '.')) * ({ B: 1, KB: 1024, MB: 1048576, GB: 1073741824 })[sm[2].toUpperCase()]);
+  }
+  return sz || 0;
+}
+
+async function handleExportIngest(env, chatId, msg) {
+  const caption = msg.caption || '';
+  const mCap = /@([A-Za-z0-9_]{3,})/.exec(caption) || /t\.me\/([A-Za-z0-9_]{3,})/.exec(caption);
+  const username = mCap ? mCap[1].toLowerCase() : '';
+  if (!username) {
+    await tg(env, 'sendMessage', { chat_id: chatId, text: '📄 استلمت ملف التصدير، لكن أحتاج يوزر القناة.\nأعد إرسال الملف واكتب في التعليق يوزر القناة، مثل: @cr_wrr' });
+    return;
+  }
+  const ch = await env.DB.prepare('SELECT username, bot_member FROM channels WHERE username = ?').bind(username).first();
+  if (!ch) {
+    await tg(env, 'sendMessage', { chat_id: chatId, text: `⚠️ القناة @${username} غير مسجّلة في المكتبة.` });
+    return;
+  }
+  const fsize = msg.document.file_size || 0;
+  if (fsize > 19 * 1024 * 1024) {
+    await tg(env, 'sendMessage', { chat_id: chatId, text: `⚠️ الملف كبير (${fmtSize(fsize)}). الحد الأقصى للإرسال المباشر 19 MB.\n\nالبديل: ارفع الملف إلى Google Drive (مشاركة: أي شخص لديه الرابط) وأرسل الرابط هنا مع يوزر القناة، وسأفهرسه تلقائيًا.` });
+    return;
+  }
+  const gf = await tg(env, 'getFile', { file_id: msg.document.file_id });
+  if (!gf || !gf.file_path) {
+    await tg(env, 'sendMessage', { chat_id: chatId, text: '⚠️ تعذّر تنزيل الملف من تيليجرام. جرّب رفعه كرابط Drive بدلًا من ذلك.' });
+    return;
+  }
+  const resp = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${gf.file_path}`);
+  const data = resp.ok ? await resp.json().catch(() => null) : null;
+  if (!data || !Array.isArray(data.messages)) {
+    await tg(env, 'sendMessage', { chat_id: chatId, text: '⚠️ هذا ليس ملف تصدير تيليجرام صالحًا (result.json).' });
+    return;
+  }
+  const msgs = data.messages;
+  let docs = 0;
+  for (const m2 of msgs) {
+    if (m2 && m2.type === 'message' && (m2.media_type === 'document' || m2.media_type === 'audio' || m2.media_type === 'voice' || m2.file_name)) docs++;
+  }
+  if (msgs.length > 60000) {
+    await tg(env, 'sendMessage', { chat_id: chatId, text: `⚠️ التصدير ضخم (${msgs.length.toLocaleString('en')} رسالة). الأفضل رفعه كرابط Drive وإرساله هنا مع يوزر القناة.` });
+    return;
+  }
+  let added = 0;
+  const batch = [];
+  for (const m2 of msgs) {
+    if (!m2 || m2.type !== 'message') continue;
+    const fname = String(m2.file_name || '').slice(0, 500);
+    const isDoc = m2.media_type === 'document' || m2.media_type === 'audio' || m2.media_type === 'voice' || fname;
+    if (!isDoc) continue;
+    const txt = exportText(m2.text);
+    const title = (fname || txt || 'ملف').slice(0, 300);
+    const ext0 = extOf(fname) || (m2.media_type === 'audio' || m2.media_type === 'voice' ? 'audio' : '');
+    batch.push(env.DB.prepare(
+      `INSERT INTO files(title, title_norm, file_name, author, author_norm, ext, size_bytes, channel, message_id, link, file_id, delivery)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(channel, message_id, title_norm) DO UPDATE SET
+         file_name = CASE WHEN excluded.file_name != '' THEN excluded.file_name ELSE files.file_name END,
+         size_bytes = CASE WHEN excluded.size_bytes > 0 THEN excluded.size_bytes ELSE files.size_bytes END`
+    ).bind(
+      title, norm(title), fname, extractAuthor(txt, fname) || '', norm(extractAuthor(txt, fname) || ''), ext0,
+      exportSize(m2), username, Number(m2.id) || 0, `https://t.me/${username}/${m2.id}`, '',
+      ch.bot_member ? 'copy' : 'link'
+    ));
+    if (batch.length >= 90) {
+      const res = await env.DB.batch(batch.splice(0));
+      for (const r of res) if (r.meta && r.meta.changes > 0) added++;
+    }
+  }
+  if (batch.length) {
+    const res = await env.DB.batch(batch);
+    for (const r of res) if (r.meta && r.meta.changes > 0) added++;
+  }
+  const maxId = msgs.reduce((a, m2) => Math.max(a, Number(m2 && m2.id) || 0), 0);
+  if (maxId) await env.DB.prepare('UPDATE channels SET last_message_id = MAX(last_message_id, ?) WHERE username = ?').bind(maxId, username).run();
+  const c = await env.DB.prepare('SELECT COUNT(*) AS c FROM files WHERE channel = ?').bind(username).first();
+  await env.DB.prepare('UPDATE channels SET file_count = ? WHERE username = ?').bind(c.c || 0, username).run();
+  await tg(env, 'sendMessage', {
+    chat_id: chatId,
+    text: `✅ تمت فهرسة ${added.toLocaleString('en')} ملفًا من @${username} (من أصل ${docs.toLocaleString('en')} مستند في التصدير).\n📦 التسليم: ${ch.bot_member ? 'إرسال مباشر (البوت مشرف)' : 'روابط'}.`,
+  });
+}
+
 // ---------- file delivery ----------
 async function deliverFile(env, settings, chatId, file) {
   const protect = settings.protect_content === '1';
@@ -378,6 +474,25 @@ async function handleUpdate(env, update) {
 
     const from = msg.from || {};
     await trackUser(env, from);
+
+    // Owner export ingest: Telegram Desktop result.json
+    if (msg.document && msg.chat.type === 'private' && isOwner(env, from.id) && /\.json$/i.test(msg.document.file_name || '')) {
+      await handleExportIngest(env, chatId, msg);
+      return;
+    }
+
+    // Owner link to a big export file (Drive/direct): queue for crawler pull
+    if (msg.chat.type === 'private' && isOwner(env, from.id) && msg.text && /https?:\/\/\S+/.test(msg.text) && /@([A-Za-z0-9_]{3,})/.test(msg.text)) {
+      const um = /@([A-Za-z0-9_]{3,})/.exec(msg.text);
+      const lm = /https?:\/\/\S+/.exec(msg.text);
+      const uname = um[1].toLowerCase();
+      const exists = await env.DB.prepare('SELECT username FROM channels WHERE username = ?').bind(uname).first();
+      if (exists && /(drive\.google|dropbox|docs\.google|\/result\.json|github\.com.*\/releases)/i.test(lm[0])) {
+        await env.DB.prepare('INSERT INTO export_jobs(url, channel) VALUES(?, ?)').bind(lm[0], uname).run();
+        await tg(env, 'sendMessage', { chat_id: chatId, text: `📥 سجّلت رابط التصدير لقناة @${uname}. سأفهرسه تلقائيًا في الجولة القادمة وأخبرك بالنتيجة.` });
+        return;
+      }
+    }
 
     // Document forwarded/sent to the bot in private: cache file_id
     const doc = msg.document || msg.audio || msg.video;
@@ -993,6 +1108,17 @@ async function handleIngest(env, request) {
   if (auth !== 'Bearer ' + env.INGEST_SECRET) return json({ error: 'unauthorized' }, 401, false);
   const url = new URL(request.url);
 
+  if (request.method === 'GET' && url.pathname === '/ingest/export-jobs') {
+    const rows = await env.DB.prepare("SELECT id, url, channel FROM export_jobs WHERE status = 'pending' ORDER BY id LIMIT 5").all();
+    return json({ jobs: rows.results || [] }, 200, false);
+  }
+  if (request.method === 'POST' && url.pathname === '/ingest/export-jobs/done') {
+    const b2 = await request.json().catch(() => ({}));
+    await env.DB.prepare('UPDATE export_jobs SET status = ?, note = ?, done_at = datetime(\'now\') WHERE id = ?')
+      .bind(String(b2.status || 'done'), String(b2.note || '').slice(0, 300), Number(b2.id) || 0).run();
+    return json({ ok: true }, 200, false);
+  }
+
   if (request.method === 'GET' && url.pathname === '/ingest/sources') {
     const rows = await env.DB.prepare(
       'SELECT username, last_message_id, bot_member, backfill_cursor FROM channels WHERE active = 1 ORDER BY username'
@@ -1060,7 +1186,7 @@ export default {
       return json({ ok: true }, 200, false);
     }
 
-    if (path === '/ingest' || path === '/ingest/sources') return handleIngest(env, request);
+    if (path.startsWith('/ingest')) return handleIngest(env, request);
 
     if (path.startsWith('/api/')) return handleApi(env, request, path);
 

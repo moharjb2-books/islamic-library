@@ -68,6 +68,84 @@ def post(path, payload):
         return json.loads(r.read().decode())
 
 
+def direct_url(url):
+    m = re.search(r"drive\.google\.com/file/d/([-\w]+)", url)
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    m = re.search(r"drive\.google\.com/open\?id=([-\w]+)", url)
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    m = re.search(r"docs\.google\.com/uc\?.*id=([-\w]+)", url)
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    return url
+
+
+def get_export_jobs():
+    req = urllib.request.Request(
+        INGEST_URL + "/export-jobs",
+        headers={"Authorization": "Bearer " + INGEST_SECRET, "User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())["jobs"]
+
+
+def export_text(t):
+    if not t:
+        return ""
+    if isinstance(t, str):
+        return t.strip()
+    if isinstance(t, list):
+        return "".join(p if isinstance(p, str) else (p.get("text", "") if isinstance(p, dict) else "") for p in t).strip()
+    return ""
+
+
+def export_size(m2):
+    sz = m2.get("file_size") or 0
+    if not sz and isinstance(m2.get("file"), str):
+        sm = re.search(r"\(([\d.,]+)\s*(B|KB|MB|GB)\)", m2["file"], re.I)
+        if sm:
+            mult = {"B": 1, "KB": 1024, "MB": 1048576, "GB": 1073741824}[sm.group(2).upper()]
+            sz = int(float(sm.group(1).replace(",", ".")) * mult)
+    return sz or 0
+
+
+def run_export_job(job):
+    url = direct_url(job["url"])
+    channel = job["channel"].lower()
+    bot_member = any(ch.get("username", "").lower() == channel and ch.get("bot_member") for ch in get_sources())
+    print(f"export job {job['id']}: downloading {url[:80]} for @{channel}", flush=True)
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=300) as r:
+        raw = r.read()
+    data = json.loads(raw.decode("utf-8", "replace"))
+    msgs = data.get("messages") or []
+    print(f"export job {job['id']}: {len(msgs)} messages", flush=True)
+    items = []
+    for m2 in msgs:
+        if not isinstance(m2, dict) or m2.get("type") != "message":
+            continue
+        fname = str(m2.get("file_name") or "")[:500]
+        is_doc = m2.get("media_type") in ("document", "audio", "voice") or fname
+        if not is_doc:
+            continue
+        txt = export_text(m2.get("text"))
+        title = (fname or txt or "ملف")[:300]
+        ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+        if not ext and m2.get("media_type") in ("audio", "voice"):
+            ext = "audio"
+        items.append({
+            "title": title, "file_name": fname, "author": author_from(txt),
+            "ext": ext, "size_bytes": export_size(m2), "message_id": m2.get("id"),
+        })
+    added = 0
+    for i in range(0, len(items), 450):
+        res = post("/ingest", {"channel": channel, "items": items[i:i + 450], "bot_member": bool(bot_member)})
+        added += res.get("added", 0)
+        time.sleep(0.3)
+    post("/ingest/export-jobs/done", {"id": job["id"], "status": "done", "note": f"indexed {added} of {len(items)} documents"})
+    print(f"export job {job['id']}: indexed {added}/{len(items)}", flush=True)
+
+
 def get_sources():
     req = urllib.request.Request(
         INGEST_URL + "/sources",
@@ -363,6 +441,15 @@ def crawl_channel(ch):
 
 
 def main():
+    for job in get_export_jobs():
+        try:
+            run_export_job(job)
+        except Exception as e:
+            print(f"export job {job.get('id')} failed: {e}", flush=True)
+            try:
+                post("/ingest/export-jobs/done", {"id": job["id"], "status": "failed", "note": str(e)[:280]})
+            except Exception:
+                pass
     channels = get_sources()
     if not channels:
         print("no sources configured", flush=True)
