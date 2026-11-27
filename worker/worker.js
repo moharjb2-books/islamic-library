@@ -5,7 +5,7 @@
 // ADMIN_SETUP_CODE. Vars: MINIAPP_URL, BOT_USERNAME, MAIN_CHANNEL.
 // Bump on every Mini App change: Telegram's WebView caches pages per URL,
 // so the web_app links carry ?v= to force a fresh load after each deploy.
-const APP_VERSION = '20261127d';
+const APP_VERSION = '20261127e';
 function miniUrl(env, extra) {
   return env.MINIAPP_URL + '?v=' + APP_VERSION + (extra ? '&' + extra : '');
 }
@@ -481,6 +481,10 @@ async function iaSearch(env, q, limit = 3) {
       .filter(d => sunniOk(d.title, d.creator) && !IA_BULK_RE.test(String(d.title || '')))
       // Skip hits with no real title: a bare identifier (WAQ59561) is not a book name.
       .filter(d => d.title && String(d.title).trim() && String(d.title).trim() !== d.identifier)
+      // Only real title matches: archive.org ranks by downloads, not relevance.
+      .map(d => ({ ...d, rel: relScore(d.title, d.creator, q) }))
+      .filter(d => d.rel > 0)
+      .sort((a, b) => b.rel - a.rel)
       .slice(0, limit);
     // Resolve a direct PDF/EPUB per item so the button downloads the book
     // itself, like a channel result, instead of opening a search page.
@@ -547,6 +551,8 @@ async function ajSearch(env, q, limit = 3) {
       const author = strip(b.author && b.author.name);
       const rawTitle = strip(b.title);
       if (!sunniOk(rawTitle, author)) return null;
+      const rel = relScore(rawTitle, author, q);
+      if (!rel) return null;
       const title = rawTitle.slice(0, 30) + (author ? ' · ' + author.slice(0, 12) : '');
       let pdf = null, alt = null, altKind = '';
       try {
@@ -564,12 +570,12 @@ async function ajSearch(env, q, limit = 3) {
         } finally { clearTimeout(t2); }
       } catch (e) {}
       if (!pdf && !alt) return null;
-      return { title, url: pdf || alt, alt: pdf ? alt : null, altKind, kind: pdf ? 'PDF' : altKind, sizeMb: 0, lib: strip(b.library && b.library.name) };
+      return { title, url: pdf || alt, alt: pdf ? alt : null, altKind, kind: pdf ? 'PDF' : altKind, sizeMb: 0, rel, lib: strip(b.library && b.library.name) };
     }));
     // Dedupe editions: same direct file, or same author + same normalized title
     // (punctuation/edition markers ignored), keeps only its first hit.
     const seen = new Set();
-    const out = items.filter(Boolean).filter(i => {
+    const out = items.filter(Boolean).sort((x, y) => y.rel - x.rel).filter(i => {
       const k1 = 'u:' + i.url;
       const k2 = 't:' + i.title.replace(/[\s\-–—:()«»]+/g, '').replace(/[أإآ]/g, 'ا').slice(0, 22);
       if (seen.has(k1) || seen.has(k2)) return false;
@@ -602,7 +608,11 @@ async function kbSearch(env, q, limit = 3) {
     const items = ((j && j.data) || [])
       .filter(b => b && b.id && b.lang === 'ar' && (b.is_free === 1 || b.is_free === true))
       .filter(b => sunniOk(strip(b.title), (b.authors || []).map(a => strip(a.name)).join(' '), (b.categories || []).map(c => strip(c.name)).join(' ')))
+      .map(b => ({ b, rel: relScore(strip(b.title), (b.authors || []).map(a => strip(a.name)).join(' '), q) }))
+      .filter(x => x.rel > 0)
+      .sort((a2, b2) => b2.rel - a2.rel)
       .slice(0, limit)
+      .map(x => x.b)
       .map(b => {
         const author = (b.authors || []).map(a => strip(a.name)).filter(Boolean).join('، ');
         const title = strip(b.title).slice(0, 28) + (author ? ` · ${author.slice(0, 14)}` : '');
@@ -828,6 +838,28 @@ function extText(aj, ext, kbk) {
   return (aj.length ? '\n\n📘 من الجامع aljam3.com (تحميل مباشر):' : '')
     + (ext.length ? '\n\n🌐 من archive.org (تحميل مباشر):' : '')
     + (kbk.length ? '\n\n📗 من كتاب أونلاين:' : '');
+}
+
+// ---------- external relevance: only real title matches ----------
+const QSTOP_RE = /^(كتاب|كتب|تحميل|برابط|مجانا|مجاناً|كامل|بجوده|عالية|pdf|من|في|علي|الي|عن|ان|إن)$/;
+function qTerms(q) {
+  return norm(q).split(/\s+/).filter(w => w.length > 2 && !QSTOP_RE.test(w));
+}
+// Every query word must match the title/author (substring, or one typo away
+// from a title word). Returns 0 for weak/fuzzy hits; otherwise coverage plus
+// a phrase bonus, so callers can rank exact matches first.
+function relScore(title, author, q) {
+  const words = qTerms(q);
+  if (!words.length) return 0;
+  const t = norm((title || '') + ' ' + (author || ''));
+  const twords = t.split(/\s+/).filter(Boolean);
+  let hit = 0;
+  for (const w of words) {
+    if (t.includes(w)) { hit++; continue; }
+    if (twords.some(tw => Math.abs(tw.length - w.length) <= 1 && editDist(w, tw, 1) <= 1)) hit++;
+  }
+  if (hit < words.length) return 0;
+  return hit + (t.includes(norm(q).replace(/\s+/g, ' ').trim()) ? 1 : 0);
 }
 
 // ---------- fuzzy suggestions ----------

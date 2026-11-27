@@ -47,27 +47,38 @@ const iaServer = http.createServer((req, res) => {
     if (id === 'tafsir-ibn-kathir-01') return res.end(JSON.stringify({ files: [{ name: 'tafsir_text.pdf', size: '12000000' }] }));
     return res.end(JSON.stringify({ files: [] }));
   }
-  res.end(JSON.stringify({ response: { numFound: 4, docs: [
+  const q = u.searchParams.get('q') || '';
+  const docs = [];
+  if (q.includes('مقدمة')) docs.push({ identifier: 'tafsir-ibn-kathir-01', title: 'مقدمة ابن خلدون ط العلمية', creator: 'ابن خلدون' });
+  if (q.includes('فقه')) docs.push({ identifier: 'tafsir-ibn-kathir-01', title: 'فقه السنة', creator: 'سيد سابق' });
+  // Noise every query gets: bulk pack, non-Sunni, and an irrelevant hit.
+  docs.push(
     { identifier: 'bulk-pack-99', title: 'كتب صيغة ورد وورد 6538 كتاب من المكتبة الشاملة', creator: null },
     { identifier: 'shia-book-98', title: 'بحار الأنوار', creator: 'المجلسي' },
-    { identifier: 'tafsir-ibn-kathir-01', title: 'تفسير ابن كثير ط العلمية', creator: 'ابن كثير' },
-    { identifier: 'another-book-02', title: 'كتاب آخر', creator: null },
-  ] } }));
+    { identifier: 'another-book-02', title: 'كتاب آخر بعيد', creator: null },
+  );
+  res.end(JSON.stringify({ response: { numFound: docs.length, docs } }));
 });
 await new Promise(r => iaServer.listen(8793, r));
 
 // ---- mock ketabonline API ----
 const kbServer = http.createServer((req, res) => {
   res.setHeader('content-type', 'application/json');
-  res.end(JSON.stringify({ data: [
-    { id: 2422, lang: 'ar', is_free: 1, title: 'العمل <em>الصالح</em>', authors: [{ name: 'سامي محمد' }],
+  const q = new URL(req.url, 'http://x').searchParams.get('q') || '';
+  const data = [];
+  if (q.includes('مقدمة') || q.includes('فقه')) data.push(
+    { id: 2422, lang: 'ar', is_free: 1, title: q.includes('مقدمة') ? 'مقدمة <em>ابن</em> خلدون' : 'فقه <em>المعاملات</em>', authors: [{ name: 'ابن خلدون' }],
       files: { data: { url: 'https://s2.ketabonline.com/books/2422/2422.data.zip', size: 636914 },
-               pdf: { url: 'https://s2.ketabonline.com/books/2422/2422.pdf.zip', size: 4965008 } } },
+               pdf: { url: 'https://s2.ketabonline.com/books/2422/2422.pdf.zip', size: 4965008 } } });
+  // Noise: no-file, paid, non-Sunni, non-Arabic, and an irrelevant free Arabic hit.
+  data.push(
     { id: 6572, lang: 'ar', is_free: 1, title: 'كتاب بلا ملف', authors: [], files: { data: { url: 'x' }, pdf: null } },
     { id: 9999, lang: 'ar', is_free: 0, title: 'كتاب مدفوع يجب استبعاده', authors: [], files: { pdf: null } },
     { id: 7777, lang: 'ar', is_free: 1, title: 'غريب القرآن', authors: [{ name: 'زيد بن علي' }], files: { pdf: { url: 'https://s2.ketabonline.com/books/7777/7777.pdf.zip', size: 1000 } } },
     { id: 8888, lang: 'en', is_free: 1, title: 'English book must be excluded', authors: [], files: { pdf: null } },
-  ] }));
+    { id: 6300, lang: 'ar', is_free: 1, title: 'العمل الصالح', authors: [{ name: 'سامي محمد' }], files: { pdf: { url: 'https://s2.ketabonline.com/books/6300/6300.pdf.zip', size: 1000 } } },
+  );
+  res.end(JSON.stringify({ data }));
 });
 await new Promise(r => kbServer.listen(8794, r));
 
@@ -76,12 +87,21 @@ const ajServer = http.createServer((req, res) => {
   res.setHeader('content-type', 'application/json');
   const u = new URL(req.url, 'http://x');
   if (u.pathname === '/api/v1/books') {
-    return res.end(JSON.stringify({ books: [
-      { id: 101, title: '<mark>رياض&nbsp;</mark>الصالحين - النووي', author: { id: 1, name: 'النووي' }, library: { id: 3, name: 'المكتبة الشاملة الوقفية' } },
-      { id: 103, title: 'رياض الصالحين - طبعة أخرى', author: { id: 1, name: 'النووي' }, library: { id: 3, name: 'الوقفية' } },
-      { id: 104, title: 'الكافي', author: { id: 9, name: 'الكليني' }, library: { id: 3, name: 'الوقفية' } },
-      { id: 102, title: 'كتاب بلا ملفات', author: { id: 2, name: 'مؤلف' }, library: { id: 3, name: 'الوقفية' } },
-    ] }));
+    const q = u.searchParams.get('q') || '';
+    const books = [];
+    if (q.includes('مقدمة')) books.push(
+      { id: 101, title: '<mark>مقدمة&nbsp;</mark>ابن خلدون', author: { id: 1, name: 'ابن خلدون' }, library: { id: 3, name: 'الوقفية' } },
+      { id: 103, title: 'مقدمة ابن خلدون - طبعة أخرى', author: { id: 1, name: 'ابن خلدون' }, library: { id: 3, name: 'الوقفية' } });
+    if (q.includes('فقه')) books.push(
+      { id: 101, title: 'فقه المعاملات', author: { id: 2, name: 'ابن قدامة' }, library: { id: 3, name: 'الوقفية' } });
+    // Noise: an irrelevant hit and a non-Sunni one.
+    books.push(
+      { id: 105, title: 'رياض الصالحين - النووي', author: { id: 1, name: 'النووي' }, library: { id: 3, name: 'الوقفية' } },
+      { id: 104, title: 'الكافي', author: { id: 9, name: 'الكليني' }, library: { id: 3, name: 'الوقفية' } });
+    return res.end(JSON.stringify({ books }));
+  }
+  if (u.pathname === '/api/v1/books/105') {
+    return res.end(JSON.stringify({ files: [{ id: 5, urls: { pdf: 'https://hf.co/riyad105.pdf' } }] }));
   }
   if (u.pathname === '/api/v1/books/103') {
     return res.end(JSON.stringify({ files: [{ id: 2, urls: { pdf: 'https://hf.co/riyad.pdf' } }] }));
@@ -152,7 +172,10 @@ check('bot search returns snapshot results with D1 dead', Boolean(resMsg && JSON
 {
   const mk = JSON.stringify((resMsg && resMsg.body.reply_markup) || {});
   const tx = (resMsg && resMsg.body.text) || '';
-  check('has-results shows external sources inline (aljam3 + archive.org + ketabonline)', mk.includes('hf.co/riyad.pdf') && mk.includes('/download/tafsir-ibn-kathir-01/') && mk.includes('ketabonline.com/ar/books/2422'), mk.slice(0, 300));
+  check('has-results shows external sources inline (aljam3 + archive.org + ketabonline)', mk.includes('hf.co/riyad.pdf') && mk.includes('hf.co/riyad.docx') && mk.includes('/download/tafsir-ibn-kathir-01/tafsir_text.pdf') && mk.includes('ketabonline.com/ar/books/2422') && mk.includes('2422.pdf.zip'), mk.slice(0, 400));
+  check('irrelevant + non-Sunni + bulk external hits are dropped', !mk.includes('رياض الصالحين') && !mk.includes('riyad105') && !mk.includes('الكافي') && !mk.includes('الكليني') && !mk.includes('kafi.pdf') && !mk.includes('bulk-pack-99') && !mk.includes('بحار') && !mk.includes('كتاب آخر') && !mk.includes('العمل الصالح') && !mk.includes('7777') && !mk.includes('9999') && !mk.includes('8888'), mk.slice(0, 500));
+  check('aljam3 duplicate editions collapse (riyad.pdf appears once)', mk.split('hf.co/riyad.pdf').length === 2, mk.slice(0, 300));
+  check('external titles are tag-stripped', !mk.includes('<mark>') && !mk.includes('<em>'), mk.slice(0, 200));
   const lbls = [...mk.matchAll(/"text":"([^"]+)"/g)].map(x => x[1]);
   check('has-results labels are clean (no underscores / raw extensions)', lbls.length > 0 && lbls.every(l => !/\.(pdf|epub|docx)/i.test(l) && !/\w_\w/.test(l)), JSON.stringify(lbls).slice(0, 300));
   check('has-results reply is cards only (no header text at all)', tx === '📚', tx.slice(0, 200));
@@ -330,12 +353,8 @@ for (const [p, b] of [
   await new Promise(r => setTimeout(r, 400));
   const m = tgCalls.find(c => c.method === 'sendMessage' && c.body.chat_id === 12345);
   const mk = m ? JSON.stringify(m.body.reply_markup || {}) : '';
-  check('not-found also offers archive.org direct-download links (federated fallback)', Boolean(m) && /archive.org/.test(m.body.text || '') && mk.includes('/download/tafsir-ibn-kathir-01/tafsir_text.pdf'), JSON.stringify(m && m.body).slice(0, 300));
-  check('IA item without files falls back to its details page', mk.includes('/details/another-book-02'), mk.slice(0, 300));
-  check('not-found offers Sunni external-library search links', mk.includes('shamela.ws/search?q=') && mk.includes('waqfeya.net/search?q=') && mk.includes('dorar.net/site/search?skeys=') && mk.includes('islamhouse.com/ar/search/'), mk.slice(0, 300));
-  check('not-found offers ketabonline reader + direct PDF, free+Arabic only, tags stripped', mk.includes('ketabonline.com/ar/books/2422') && mk.includes('2422.pdf.zip') && mk.includes('ketabonline.com/ar/books/6572') && !mk.includes('9999') && !mk.includes('8888') && !mk.includes('<em>') && mk.includes('سامي محمد'), mk.slice(0, 400));
-  check('not-found offers aljam3 first with direct PDF + DOCX, tags stripped, empty-file book dropped', mk.includes('hf.co/riyad.pdf') && mk.includes('hf.co/riyad.docx') && !mk.includes('<mark>') && !mk.includes('بلا ملفات') && (m.body.text || '').indexOf('الجامع') > -1 && (m.body.text || '').indexOf('الجامع') < (m.body.text || '').indexOf('archive.org'), JSON.stringify(m && m.body).slice(0, 400));
-  check('external sources filter non-Sunni + IA bulk packs + dedupe editions', !mk.includes('الكليني') && !mk.includes('زيد بن علي') && !mk.includes('7777') && !mk.includes('bulk-pack-99') && !mk.includes('shia-book-98') && mk.split('hf.co/riyad.pdf').length === 2 && !mk.includes('kafi.pdf'), mk.slice(0, 500));
+  check('not-found still answers: suggestions + Sunni library search links', Boolean(m) && (m.body.text || '').includes('لم أجد') && mk.includes('shamela.ws/search?q=') && mk.includes('waqfeya.net/search?q=') && mk.includes('dorar.net/site/search?skeys=') && mk.includes('islamhouse.com/ar/search/'), JSON.stringify(m && m.body).slice(0, 300));
+  check('not-found drops weak/irrelevant external hits entirely', !mk.includes('hf.co/') && !mk.includes('/download/') && !mk.includes('ketabonline.com/ar/books') && !mk.includes('/details/'), mk.slice(0, 300));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
