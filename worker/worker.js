@@ -170,13 +170,18 @@ const DEFAULTS = {
   notify_new: '0',
   admin_ids: '',
 };
+let settingsCache = { at: 0, s: null };
 async function getSettings(env) {
+  if (settingsCache.s && Date.now() - settingsCache.at < 300000) return settingsCache.s;
+  if (snapOn && !snapMaybeProbe()) return settingsCache.s || { ...DEFAULTS };
   const s = { ...DEFAULTS };
   try {
-    const rows = await env.DB.prepare('SELECT key, value FROM settings').all();
+    const rows = await withTimeout(env.DB.prepare('SELECT key, value FROM settings').all(), 2500);
     for (const r of rows.results || []) s[r.key] = r.value;
+    snapRecovered();
+    settingsCache = { at: Date.now(), s };
   } catch (e) { snapNote(); }
-  return s;
+  return settingsCache.s || s;
 }
 
 // ---------- snapshot fallback (static search while D1 is unavailable) ----------
@@ -187,6 +192,24 @@ async function getSettings(env) {
 // recovers; every request retries D1 first whenever snapOn did not trip yet.
 let snapOn = false;
 function snapNote() { snapOn = true; }
+function snapRecovered() { snapOn = false; }
+// While snapOn, D1 is probed at most once a minute; every other caller goes
+// straight to the snapshot instead of paying a failing round trip per call.
+let snapProbeAt = 0;
+function snapMaybeProbe() {
+  if (!snapOn) return true;
+  if (Date.now() - snapProbeAt < 60000) return false;
+  snapProbeAt = Date.now();
+  return true;
+}
+function withTimeout(p, ms) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('db timeout')), ms))]);
+}
+// Non-critical work off the reply path: tracking, logging.
+function defer(ctx, p) {
+  const q = p.catch(e => console.error('deferred failed:', (e && e.message) || e));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(q);
+}
 let SNAP_BASE = 'https://moharjb2-books.github.io/islamic-library/snapshot';
 let snapMetaCache = { at: 0, meta: null };
 
@@ -304,6 +327,7 @@ async function setSetting(env, key, value) {
   await env.DB.prepare(
     'INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'
   ).bind(key, String(value)).run();
+  settingsCache.at = 0;
 }
 
 // ---------- Telegram API ----------
@@ -349,16 +373,19 @@ function isOwner(env, userId) {
 async function isAdmin(env, settings, userId) {
   if (!userId) return false;
   if (env.OWNER_ID && String(userId) === String(env.OWNER_ID)) return true;
-  try {
-    const row = await env.DB.prepare('SELECT is_admin FROM users WHERE user_id = ?').bind(userId).first();
-    if (row && row.is_admin) return true;
-  } catch (e) { snapNote(); }
+  if (!snapOn) {
+    try {
+      const row = await withTimeout(env.DB.prepare('SELECT is_admin FROM users WHERE user_id = ?').bind(userId).first(), 2500);
+      if (row && row.is_admin) return true;
+    } catch (e) { snapNote(); }
+  }
   const ids = (settings.admin_ids || '').split(',').map(x => x.trim()).filter(Boolean);
   return ids.includes(String(userId));
 }
 
 async function trackUser(env, from) {
   if (!from || !from.id) return;
+  if (snapOn) return;  // known-down DB: do not pay a failing call on the reply path
   try {
     await env.DB.prepare(
       `INSERT INTO users(user_id, first_name, username, last_seen) VALUES(?,?,?,unixepoch())
@@ -443,9 +470,12 @@ async function countExtDB(env, q) {
 
 // Fallback-aware wrappers: try D1 first, flip to the static snapshot on error.
 async function searchFiles(env, q, ext, offset, limit, includeAudio) {
-  if (snapOn) { try { return await snapSearch(q, ext, offset, limit, includeAudio); } catch (e) {} }
-  try { return await searchFilesDB(env, q, ext, offset, limit, includeAudio); }
-  catch (e) { snapNote(); return await snapSearch(q, ext, offset, limit, includeAudio); }
+  if (snapOn && !snapMaybeProbe()) return snapSearch(q, ext, offset, limit, includeAudio);
+  try {
+    const r = await withTimeout(searchFilesDB(env, q, ext, offset, limit, includeAudio), 3000);
+    snapRecovered();
+    return r;
+  } catch (e) { snapNote(); return await snapSearch(q, ext, offset, limit, includeAudio); }
 }
 async function countExt(env, q) {
   if (snapOn) return null;
@@ -707,7 +737,10 @@ async function forcedList(env) {
   return forcedCache.list;
 }
 
-async function checkForced(env, userId) {
+const memberCache = new Map();  // userId -> {at, missing}; Telegram calls are the slowest hop
+async function checkForced(env, userId, fresh) {
+  const hit = !fresh && memberCache.get(userId);
+  if (hit && Date.now() - hit.at < 600000) return hit.missing;
   const list = await forcedList(env);
   const missing = [];
   for (const u of list) {
@@ -717,11 +750,13 @@ async function checkForced(env, userId) {
       if (['left', 'kicked'].includes(st)) missing.push(u);
     } catch (e) { missing.push(u); }
   }
+  memberCache.set(userId, { at: Date.now(), missing });
+  if (memberCache.size > 5000) memberCache.clear();
   return missing;
 }
 
 // ---------- webhook ----------
-async function handleUpdate(env, update) {
+async function handleUpdate(env, update, ctx2) {
   const settings = await getSettings(env);
 
   if (update.message || update.channel_post) {
@@ -752,7 +787,7 @@ async function handleUpdate(env, update) {
     }
 
     const from = msg.from || {};
-    await trackUser(env, from);
+    defer(ctx2, trackUser(env, from));
 
     // Owner export ingest: Telegram Desktop result.json
     if (msg.document && msg.chat.type === 'private' && isOwner(env, from.id) && /\.json$/i.test(msg.document.file_name || '')) {
@@ -890,7 +925,7 @@ async function handleUpdate(env, update) {
       const perPage = parseInt(settings.per_page, 10) || 10;
       const audioAsked = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(text);
       const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
-      await logSearch(env, from.id, text, items.length);
+      defer(ctx2, logSearch(env, from.id, text, items.length));
       if (!items.length) {
         let sug = [];
         try { sug = await suggestTitles(env, text, 3); } catch (e) {}
@@ -994,7 +1029,7 @@ async function handleUpdate(env, update) {
       return;
     }
     if (data === 'recheck') {
-      const missing = await checkForced(env, cb.from.id);
+      const missing = await checkForced(env, cb.from.id, true);
       if (missing.length) {
         await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'ما زلت غير مشترك في كل القنوات', show_alert: true });
       } else {
@@ -1044,7 +1079,7 @@ async function handleUpdate(env, update) {
       const q2 = f.title.split(/\s+/).slice(0, 5).join(' ');
       const perPage2 = parseInt(settings2.per_page, 10) || 10;
       const { items } = await searchFiles(env, q2, 'all', 0, perPage2);
-      await logSearch(env, cb.from.id, q2, items.length);
+      defer(ctx2, logSearch(env, cb.from.id, q2, items.length));
       if (!items.length) {
         await tg(env, 'sendMessage', { chat_id: chatId, text: `🔍 لم أجد نتائج مطابقة لـ«${q2}».` });
         return;
@@ -1216,7 +1251,7 @@ async function apiUser(env, request, body) {
   return validateInitData(env, initData);
 }
 
-async function handleApi(env, request, path) {
+async function handleApi(env, request, path, ctx2) {
   const url = new URL(request.url);
   const settings = await getSettings(env);
 
@@ -1240,7 +1275,7 @@ async function handleApi(env, request, path) {
     const { items, hasMore } = await searchFiles(env, q, ext, off, perPage);
     if (q) {
       const u = await apiUser(env, request).catch(() => null);
-      await logSearch(env, u && u.id ? u.id : 0, q, items.length);
+      defer(ctx2, logSearch(env, u && u.id ? u.id : 0, q, items.length));
     }
     const counts = q ? await countExt(env, q) : null;
     let suggestions = null;
@@ -1538,13 +1573,13 @@ async function handleFetch(request, env, ctx) {
 
     if (path === `/tg/${env.WEBHOOK_SECRET}` && request.method === 'POST') {
       const update = await request.json().catch(() => null);
-      if (update) ctx.waitUntil(handleUpdate(env, update).catch(e => console.error('handleUpdate failed:', (e && e.stack) || e)));
+      if (update) ctx.waitUntil(handleUpdate(env, update, ctx).catch(e => console.error('handleUpdate failed:', (e && e.stack) || e)));
       return json({ ok: true }, 200, false);
     }
 
     if (path.startsWith('/ingest')) return handleIngest(env, request);
 
-    if (path.startsWith('/api/')) return handleApi(env, request, path);
+    if (path.startsWith('/api/')) return handleApi(env, request, path, ctx);
 
     return json({ error: 'not found' }, 404, false);
 }
