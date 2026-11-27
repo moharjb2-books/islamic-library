@@ -879,13 +879,12 @@ async function recheckMemberships(env) {
       const r = await tg(env, 'getChatMember', { chat_id: '@' + ch.username, user_id: Number(botId) });
       const st = r && r.ok && r.result && r.result.status;
       const member = (st === 'administrator' || st === 'creator' || st === 'member') ? 1 : 0;
-      if (member !== (ch.bot_member ? 1 : 0)) {
-        await env.DB.prepare('UPDATE channels SET bot_member = ? WHERE username = ?').bind(member, ch.username).run();
-        if (member) {
-          await env.DB.prepare("UPDATE files SET delivery = 'copy' WHERE channel = ? AND delivery = 'link' AND file_id = ''").bind(ch.username).run();
-        } else {
-          await env.DB.prepare("UPDATE files SET delivery = 'link' WHERE channel = ? AND delivery = 'copy' AND file_id = ''").bind(ch.username).run();
-        }
+      await env.DB.prepare('UPDATE channels SET bot_member = ? WHERE username = ?').bind(member, ch.username).run();
+      // repair delivery rows every sweep (new ingests may carry a stale flag)
+      if (member) {
+        await env.DB.prepare("UPDATE files SET delivery = 'copy' WHERE channel = ? AND delivery = 'link' AND file_id = ''").bind(ch.username).run();
+      } else {
+        await env.DB.prepare("UPDATE files SET delivery = 'link' WHERE channel = ? AND delivery = 'copy' AND file_id = ''").bind(ch.username).run();
       }
     } catch (e) {}
   }
