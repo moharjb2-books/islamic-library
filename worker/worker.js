@@ -296,53 +296,54 @@ async function snapGetFileById(id) {
 }
 async function snapSuggest(q, limit) {
   const nq = norm(q);
-  const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 6);
+  const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 4)
+    .sort((a, b) => b.length - a.length).slice(0, 2).map(x => x.slice(0, 20));
   if (!qwords.length) return [];
-  const mainW = qwords.slice().sort((a, b) => b.length - a.length)[0].slice(0, 20);
-  let shard;
-  try { shard = await snapGet('/idx/' + encodeURIComponent(mainW.slice(0, 2)) + '.json'); }
-  catch (e) { return []; }
-  const scored = [];
-  let budget = 2000;
-  for (const k of Object.keys(shard)) {
-    if (k.length < 3) continue;
-    if (k.includes(mainW) || mainW.includes(k)) { scored.push([Math.abs(k.length - mainW.length) > 2 ? 1 : 0, k]); continue; }
-    if (k[0] !== mainW[0] || Math.abs(k.length - mainW.length) > 3) continue;
-    if (budget-- <= 0) break;
-    scored.push([editDist(mainW, k, 3), k]);
-  }
-  scored.sort((a, b) => a[0] - b[0] || a[1].length - b[1].length);
-  // Resolve the closest tokens to real book rows so callers get {id, title},
-  // the same shape the DB suggester returns. Per token, sample its newest
-  // postings and keep the shortest title that still contains the token:
-  // collection-prefixed dumps ("Quraan00063_...") lose to clean book names.
   const out = [];
   const seenT = new Set();
   const chunks = {};
   let fetches = 0;
-  for (const s of scored) {
-    if (s[0] > 2 || out.length >= limit) break;
-    const posts = shard[s[1]];
-    if (!posts || !posts.length) continue;
-    let best = null;
-    for (const g of posts.slice(-8)) {
-      const ci = Math.floor(g / 500);
-      if (!chunks[ci]) {
-        if (fetches >= 6) continue;
-        try { chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json'); fetches++; }
-        catch (e) { continue; }
-      }
-      const r = chunks[ci][g % 500];
-      if (!r) continue;
-      const title = String(r[1] || '').trim();
-      if (!title || !norm(title).includes(s[1])) continue;
-      if (!best || title.length < best.title.length) best = { id: r[0], title };
+  for (const w of qwords) {
+    if (out.length >= limit || fetches >= 6) break;
+    let shard;
+    try { shard = await snapGet('/idx/' + encodeURIComponent(w.slice(0, 2)) + '.json'); }
+    catch (e) { continue; }
+    const scored = [];
+    let budget = 1500;
+    for (const k of Object.keys(shard)) {
+      if (k.length < 3) continue;
+      if (k.includes(w) || w.includes(k)) { scored.push([Math.abs(k.length - w.length) > 2 ? 1 : 0, k]); continue; }
+      if (k[0] !== w[0] || Math.abs(k.length - w.length) > 3) continue;
+      if (budget-- <= 0) break;
+      scored.push([editDist(w, k, 3), k]);
     }
-    if (!best) continue;
-    const pt = prettyTitle(best.title);
-    if (seenT.has(pt)) continue;
-    seenT.add(pt);
-    out.push({ id: best.id, title: pt });
+    scored.sort((a, b) => a[0] - b[0] || a[1].length - b[1].length);
+    // Per token, sample its newest postings and keep the shortest title that
+    // still contains it: collection-prefixed dumps lose to clean book names.
+    for (const s of scored) {
+      if (s[0] > 2 || out.length >= limit || fetches >= 6) break;
+      const posts = shard[s[1]];
+      if (!posts || !posts.length) continue;
+      let best = null;
+      for (const g of posts.slice(-8)) {
+        const ci = Math.floor(g / 500);
+        if (!chunks[ci]) {
+          if (fetches >= 6) continue;
+          try { chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json'); fetches++; }
+          catch (e) { continue; }
+        }
+        const r = chunks[ci][g % 500];
+        if (!r) continue;
+        const title = String(r[1] || '').trim();
+        if (!title || !norm(title).includes(s[1])) continue;
+        if (!best || title.length < best.title.length) best = { id: r[0], title };
+      }
+      if (!best) continue;
+      const pt = prettyTitle(best.title);
+      if (seenT.has(pt)) continue;
+      seenT.add(pt);
+      out.push({ id: best.id, title: pt });
+    }
   }
   return out;
 }
