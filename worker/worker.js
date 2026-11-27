@@ -313,26 +313,36 @@ async function snapSuggest(q, limit) {
   }
   scored.sort((a, b) => a[0] - b[0] || a[1].length - b[1].length);
   // Resolve the closest tokens to real book rows so callers get {id, title},
-  // the same shape the DB suggester returns.
+  // the same shape the DB suggester returns. Per token, sample its newest
+  // postings and keep the shortest title that still contains the token:
+  // collection-prefixed dumps ("Quraan00063_...") lose to clean book names.
   const out = [];
   const seenT = new Set();
   const chunks = {};
+  let fetches = 0;
   for (const s of scored) {
     if (s[0] > 2 || out.length >= limit) break;
     const posts = shard[s[1]];
     if (!posts || !posts.length) continue;
-    const g = posts[posts.length - 1];
-    const ci = Math.floor(g / 500);
-    if (!chunks[ci]) {
-      try { chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json'); }
-      catch (e) { continue; }
+    let best = null;
+    for (const g of posts.slice(-8)) {
+      const ci = Math.floor(g / 500);
+      if (!chunks[ci]) {
+        if (fetches >= 6) continue;
+        try { chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json'); fetches++; }
+        catch (e) { continue; }
+      }
+      const r = chunks[ci][g % 500];
+      if (!r) continue;
+      const title = String(r[1] || '').trim();
+      if (!title || !norm(title).includes(s[1])) continue;
+      if (!best || title.length < best.title.length) best = { id: r[0], title };
     }
-    const r = chunks[ci][g % 500];
-    if (!r) continue;
-    const title = String(r[1] || '').trim();
-    if (!title || seenT.has(title)) continue;
-    seenT.add(title);
-    out.push({ id: r[0], title });
+    if (!best) continue;
+    const pt = prettyTitle(best.title);
+    if (seenT.has(pt)) continue;
+    seenT.add(pt);
+    out.push({ id: best.id, title: pt });
   }
   return out;
 }
