@@ -193,7 +193,11 @@ async function logSearch(env, userId, q, results) {
 }
 
 // ---------- search ----------
-async function searchFiles(env, q, ext, offset, limit) {
+const AUDIO_EXT_LIST = ['mp3','m4a','ogg','oga','opus','wav','aac','flac','weba','audio'];
+const AUDIO_EXTS = "('" + AUDIO_EXT_LIST.join("','") + "')";
+function isAudioExt(e) { return AUDIO_EXT_LIST.includes(String(e || '').toLowerCase()); }
+
+async function searchFiles(env, q, ext, offset, limit, includeAudio) {
   const nq = norm(q);
   let where = '1=1';
   const binds = [];
@@ -202,8 +206,10 @@ async function searchFiles(env, q, ext, offset, limit) {
     binds.push(`%${nq}%`, `%${nq}%`);
   }
   if (ext && ext !== 'all') {
-    if (ext === 'audio') { where += " AND ext IN ('mp3','m4a','ogg','opus','wav')"; }
+    if (ext === 'audio') { where += ` AND ext IN ${AUDIO_EXTS}`; }
     else { where += ' AND ext = ?'; binds.push(ext.toLowerCase()); }
+  } else if (!includeAudio) {
+    where += ` AND ext NOT IN ${AUDIO_EXTS}`;
   }
   binds.push(limit + 1, offset);
   const rows = await env.DB.prepare(
@@ -221,13 +227,13 @@ async function countExt(env, q) {
   const binds = [];
   if (nq) { where += ' AND (title_norm LIKE ? OR author_norm LIKE ?)'; binds.push(`%${nq}%`, `%${nq}%`); }
   const rows = await env.DB.prepare(
-    `SELECT CASE WHEN ext IN ('mp3','m4a','ogg','opus','wav') THEN 'audio' ELSE ext END AS k, COUNT(*) AS c
+    `SELECT CASE WHEN ext IN ${AUDIO_EXTS} THEN 'audio' ELSE ext END AS k, COUNT(*) AS c
      FROM files WHERE ${where} GROUP BY k`
   ).bind(...binds).all();
   const out = {};
   let total = 0;
   for (const r of rows.results || []) { out[r.k || 'other'] = r.c; total += r.c; }
-  out.all = total;
+  out.all = total - (out.audio || 0);
   return out;
 }
 
@@ -286,9 +292,10 @@ async function handleUpdate(env, update) {
       if (doc) {
         const username = (msg.chat.username || '').toLowerCase();
         const title = doc.file_name || msg.caption || 'ملف';
+        const ext0 = extOf(doc.file_name || '') || (!msg.document && msg.audio ? 'audio' : '');
         await upsertFile(env, {
           title, file_name: doc.file_name || '', author: extractAuthor(title, msg.caption),
-          ext: extOf(doc.file_name || ''), size_bytes: doc.file_size || 0,
+          ext: ext0, size_bytes: doc.file_size || 0,
           channel: username, message_id: msg.message_id,
           link: username ? `https://t.me/${username}/${msg.message_id}` : '',
           file_id: doc.file_id, delivery: 'copy',
@@ -311,9 +318,10 @@ async function handleUpdate(env, update) {
       const fwd = msg.forward_from_chat && msg.forward_from_chat.username
         ? msg.forward_from_chat.username.toLowerCase() : '';
       const title = doc.file_name || msg.caption || 'ملف';
+      const ext0 = extOf(doc.file_name || '') || (!msg.document && msg.audio ? 'audio' : '');
       await upsertFile(env, {
         title, file_name: doc.file_name || '', author: extractAuthor(title, msg.caption),
-        ext: extOf(doc.file_name || ''), size_bytes: doc.file_size || 0,
+        ext: ext0, size_bytes: doc.file_size || 0,
         channel: fwd, message_id: msg.forward_from_message_id || 0,
         link: fwd && msg.forward_from_message_id ? `https://t.me/${fwd}/${msg.forward_from_message_id}` : '',
         file_id: doc.file_id, delivery: 'file_id',
@@ -413,7 +421,8 @@ async function handleUpdate(env, update) {
     if (text && !text.startsWith('/')) {
       // Plain search in chat
       const perPage = parseInt(settings.per_page, 10) || 10;
-      const { items } = await searchFiles(env, text, 'all', 0, perPage);
+      const audioAsked = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(text);
+      const { items } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
       await logSearch(env, from.id, text, items.length);
       if (!items.length) {
         await tg(env, 'sendMessage', {
@@ -424,7 +433,7 @@ async function handleUpdate(env, update) {
       }
       const missing = await checkForced(env, from.id);
       const keyboard = items.map(f => {
-        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${(f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') {
           return [{ text: label, callback_data: 'dl:' + f.id }];
         }
@@ -461,7 +470,7 @@ async function handleUpdate(env, update) {
         return;
       }
       const keyboard = items.map(f => {
-        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${(f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id }];
         return [{ text: label, url: f.link }];
       });
@@ -479,7 +488,7 @@ async function handleUpdate(env, update) {
         return;
       }
       const keyboard = items.map(f => {
-        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${(f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id }];
         return [{ text: label, url: f.link }];
       });
@@ -876,7 +885,7 @@ async function handleApi(env, request, path) {
 
 function publicFile(f) {
   return {
-    id: f.id, title: f.title, file_name: f.file_name || f.title, author: f.author, ext: f.ext,
+    id: f.id, title: f.title, file_name: f.file_name || f.title, author: f.author, ext: f.ext, is_audio: isAudioExt(f.ext),
     size_bytes: f.size_bytes, size: fmtSize(f.size_bytes),
     channel: f.channel, link: f.link,
     deliverable: Boolean(f.file_id) || f.delivery === 'copy',
