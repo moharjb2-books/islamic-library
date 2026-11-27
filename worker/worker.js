@@ -349,18 +349,22 @@ function isOwner(env, userId) {
 async function isAdmin(env, settings, userId) {
   if (!userId) return false;
   if (env.OWNER_ID && String(userId) === String(env.OWNER_ID)) return true;
-  const row = await env.DB.prepare('SELECT is_admin FROM users WHERE user_id = ?').bind(userId).first();
-  if (row && row.is_admin) return true;
+  try {
+    const row = await env.DB.prepare('SELECT is_admin FROM users WHERE user_id = ?').bind(userId).first();
+    if (row && row.is_admin) return true;
+  } catch (e) { snapNote(); }
   const ids = (settings.admin_ids || '').split(',').map(x => x.trim()).filter(Boolean);
   return ids.includes(String(userId));
 }
 
 async function trackUser(env, from) {
   if (!from || !from.id) return;
-  await env.DB.prepare(
-    `INSERT INTO users(user_id, first_name, username, last_seen) VALUES(?,?,?,unixepoch())
-     ON CONFLICT(user_id) DO UPDATE SET first_name=excluded.first_name, username=excluded.username, last_seen=unixepoch()`
-  ).bind(from.id, from.first_name || '', from.username || '').run();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO users(user_id, first_name, username, last_seen) VALUES(?,?,?,unixepoch())
+       ON CONFLICT(user_id) DO UPDATE SET first_name=excluded.first_name, username=excluded.username, last_seen=unixepoch()`
+    ).bind(from.id, from.first_name || '', from.username || '').run();
+  } catch (e) { snapNote(); }  // a capped DB must never kill the bot's reply path
 }
 
 async function logSearch(env, userId, q, results) {
@@ -954,10 +958,13 @@ async function handleUpdate(env, update) {
     }
     if (data === 'favs') {
       await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
-      const rows = await env.DB.prepare(
-        'SELECT f.* FROM favorites v JOIN files f ON f.id = v.file_id WHERE v.user_id = ? ORDER BY v.created_at DESC LIMIT 10'
-      ).bind(cb.from.id).all();
-      const items = rows.results || [];
+      let items = [];
+      try {
+        const rows = await env.DB.prepare(
+          'SELECT f.* FROM favorites v JOIN files f ON f.id = v.file_id WHERE v.user_id = ? ORDER BY v.created_at DESC LIMIT 10'
+        ).bind(cb.from.id).all();
+        items = rows.results || [];
+      } catch (e) { snapNote(); }
       if (!items.length) {
         await tg(env, 'sendMessage', { chat_id: chatId, text: 'مفضلتك فارغة. أضف كتبًا إليها من صفحة البحث بالضغط على ☆.' });
         return;
@@ -999,9 +1006,12 @@ async function handleUpdate(env, update) {
     if (data.startsWith('more:')) {
       const off = parseInt(data.slice(5), 10) || 0;
       await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
-      const last = await env.DB.prepare(
-        'SELECT q FROM searches WHERE user_id = ? AND results > 0 ORDER BY id DESC LIMIT 1'
-      ).bind(cb.from.id).first();
+      let last = null;
+      try {
+        last = await env.DB.prepare(
+          'SELECT q FROM searches WHERE user_id = ? AND results > 0 ORDER BY id DESC LIMIT 1'
+        ).bind(cb.from.id).first();
+      } catch (e) { snapNote(); }
       if (!last || !last.q) {
         await tg(env, 'sendMessage', { chat_id: chatId, text: 'أرسل كلمة البحث من جديد لمتابعة النتائج.' });
         return;
@@ -1497,12 +1507,14 @@ async function handleIngest(env, request) {
 // ---------- router ----------
 export default {
   async scheduled(event, env, ctx) {
-    await migrate(env);
-    const rows = await env.DB.prepare(
-      "SELECT id FROM broadcasts WHERE status IN ('pending','sending') ORDER BY id LIMIT 3"
-    ).all();
-    for (const r of rows.results || []) ctx.waitUntil(runBroadcastChunk(env, r.id));
-    if (new Date().getUTCMinutes() % 30 === 0) ctx.waitUntil(recheckMemberships(env));
+    try {
+      await migrate(env);
+      const rows = await env.DB.prepare(
+        "SELECT id FROM broadcasts WHERE status IN ('pending','sending') ORDER BY id LIMIT 3"
+      ).all();
+      for (const r of rows.results || []) ctx.waitUntil(runBroadcastChunk(env, r.id));
+      if (new Date().getUTCMinutes() % 30 === 0) ctx.waitUntil(recheckMemberships(env));
+    } catch (e) { console.error('scheduled failed:', (e && e.stack) || e); }
   },
 
   async fetch(request, env, ctx) {
@@ -1526,7 +1538,7 @@ async function handleFetch(request, env, ctx) {
 
     if (path === `/tg/${env.WEBHOOK_SECRET}` && request.method === 'POST') {
       const update = await request.json().catch(() => null);
-      if (update) ctx.waitUntil(handleUpdate(env, update));
+      if (update) ctx.waitUntil(handleUpdate(env, update).catch(e => console.error('handleUpdate failed:', (e && e.stack) || e)));
       return json({ ok: true }, 200, false);
     }
 
