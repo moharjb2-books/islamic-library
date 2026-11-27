@@ -78,6 +78,33 @@ const SCHEMA = [
 ];
 
 let migrated = false;
+async function reindexNormV2(env) {
+  const v = await env.DB.prepare("SELECT value FROM settings WHERE key = 'norm_v'").first();
+  if (v && v.value === '2') return;
+  const rows = await env.DB.prepare('SELECT id, channel, message_id, title, author, file_id, size_bytes FROM files').all();
+  const all = rows.results || [];
+  const groups = new Map();
+  for (const r of all) {
+    const k = r.channel + '|' + r.message_id + '|' + norm(r.title);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  const drop = [], updates = [];
+  for (const [, g] of groups) {
+    g.sort((a, b) => ((b.file_id ? 1 : 0) - (a.file_id ? 1 : 0)) || (b.size_bytes - a.size_bytes) || (a.id - b.id));
+    for (let i = 1; i < g.length; i++) drop.push(g[i].id);
+    updates.push({ id: g[0].id, t: norm(g[0].title), a: norm(g[0].author || '') });
+  }
+  for (let i = 0; i < drop.length; i += 400) {
+    await env.DB.batch(drop.slice(i, i + 400).map(id => env.DB.prepare('DELETE FROM files WHERE id = ?').bind(id)));
+  }
+  for (let i = 0; i < updates.length; i += 400) {
+    await env.DB.batch(updates.slice(i, i + 400).map(u =>
+      env.DB.prepare('UPDATE files SET title_norm = ?, author_norm = ? WHERE id = ?').bind(u.t, u.a, u.id)));
+  }
+  await env.DB.prepare("INSERT INTO settings(key, value) VALUES('norm_v', '2') ON CONFLICT(key) DO UPDATE SET value = '2'").run();
+}
+
 async function migrate(env) {
   if (migrated) return;
   for (const stmt of SCHEMA) await env.DB.prepare(stmt).run();
@@ -86,6 +113,7 @@ async function migrate(env) {
   try { await env.DB.prepare('ALTER TABLE channels ADD COLUMN backfill_cursor INTEGER DEFAULT 0').run(); } catch (e) {}
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS export_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, channel TEXT NOT NULL, status TEXT DEFAULT 'pending', note TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), done_at TEXT DEFAULT '')").run(); } catch (e) {}
   migrated = true;
+  try { await reindexNormV2(env); } catch (e) { migrated = false; }
 }
 
 // ---------- Arabic normalization ----------
@@ -97,6 +125,7 @@ function norm(s) {
     .replace(/ى/g, 'ي')
     .replace(/[ؤئ]/g, 'ء')
     .toLowerCase()
+    .replace(/[_.\-–—,،;:!?؟()[\]{}«»"'\/\\|~*+=]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
