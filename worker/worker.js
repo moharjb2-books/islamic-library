@@ -1114,6 +1114,18 @@ async function handleUpdate(env, update, ctx2) {
 
     let text = (msg.text || '').trim();
 
+    // Groups: the bot stays silent unless the message starts with "بحث";
+    // the rest of the message is the query. Private chat is unchanged.
+    if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
+      const gm = text.match(/^بحث(?:\s*[:\-]?\s*)([\s\S]*)$/);
+      if (!gm) return;
+      text = gm[1].trim();
+      if (!text) {
+        await tg(env, 'sendMessage', { chat_id: chatId, text: 'اكتب: بحث اسم الكتاب أو المؤلف 📚' });
+        return;
+      }
+    }
+
     // Forced-subscription gate: everything below needs membership.
     // Owner/admins and the admin-claim deep link bypass. The channel list
     // falls back to env/snapshot/main-channel when D1 is down, so the gate

@@ -238,6 +238,36 @@ if (typoSug) {
   check('sq: suggestion pick returns results (D1 dead)', Boolean(sqRes), JSON.stringify(tgCalls).slice(0, 300));
 }
 
+// 8b. Groups: silent unless the message starts with بحث
+{
+  tgCalls.length = 0;
+  await fire({ update_id: 31, message: { message_id: 31, chat: { id: -100999, type: 'supergroup' }, from: { id: 777001, first_name: 'G' }, text: 'مقدمة ابن خلدون' } });
+  await new Promise(r => setTimeout(r, 300));
+  check('group: plain message without بحث gets total silence', !tgCalls.some(c => c.method === 'sendMessage'), JSON.stringify(tgCalls).slice(0, 200));
+
+  tgCalls.length = 0;
+  await fire({ update_id: 32, message: { message_id: 32, chat: { id: -100999, type: 'supergroup' }, from: { id: 777001, first_name: 'G' }, text: 'السلام عليكم' } });
+  await new Promise(r => setTimeout(r, 300));
+  check('group: greeting gets total silence', !tgCalls.some(c => c.method === 'sendMessage'), JSON.stringify(tgCalls).slice(0, 200));
+
+  tgCalls.length = 0;
+  await fire({ update_id: 33, message: { message_id: 33, chat: { id: -100999, type: 'supergroup' }, from: { id: 777001, first_name: 'G' }, text: 'بحث مقدمة ابن خلدون' } });
+  await new Promise(r => setTimeout(r, 400));
+  const gm = tgCalls.find(c => c.method === 'sendMessage' && c.body.chat_id === -100999);
+  check('group: بحث + query returns results cards', Boolean(gm && JSON.stringify(gm.body.reply_markup || {}).includes('dl:')), JSON.stringify(gm && gm.body).slice(0, 200));
+
+  tgCalls.length = 0;
+  await fire({ update_id: 34, message: { message_id: 34, chat: { id: -100999, type: 'group' }, from: { id: 777001, first_name: 'G' }, text: 'بحث' } });
+  await new Promise(r => setTimeout(r, 300));
+  const gh = tgCalls.find(c => c.method === 'sendMessage');
+  check('group: bare بحث gets a usage hint', Boolean(gh && /بحث اسم الكتاب/.test(gh.body.text || '')), JSON.stringify(gh && gh.body).slice(0, 200));
+
+  tgCalls.length = 0;
+  await fire({ update_id: 35, message: { message_id: 35, chat: { id: -100999, type: 'supergroup' }, from: { id: 777001, first_name: 'G' }, text: '/start' } });
+  await new Promise(r => setTimeout(r, 300));
+  check('group: /start gets total silence', !tgCalls.some(c => c.method === 'sendMessage'), JSON.stringify(tgCalls).slice(0, 200));
+}
+
 // 9. API typo search -> suggestions carry {id, title}
 const sR = await worker.fetch(new Request('http://local/api/search?q=' + encodeURIComponent('مقمدة ابن خلدونن')), env, ctx());
 const sJ = await sR.json();
