@@ -1,0 +1,153 @@
+name: Shard backfill for huge channels
+'on':
+  push:
+    paths:
+    - .github/workflows/shards.yml
+  workflow_dispatch: {}
+permissions:
+  actions: write
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - channel: cr_wrr1
+          frm: 1
+          to: 7000
+        - channel: cr_wrr1
+          frm: 7001
+          to: 14000
+        - channel: cr_wrr1
+          frm: 14001
+          to: 21000
+        - channel: cr_wrr1
+          frm: 21001
+          to: 28000
+        - channel: cr_wrr1
+          frm: 28001
+          to: 35000
+        - channel: cr_wrr1
+          frm: 35001
+          to: 42000
+        - channel: cr_wrr1
+          frm: 42001
+          to: 49000
+        - channel: cr_wrr1
+          frm: 49001
+          to: 56000
+        - channel: cr_wrr1
+          frm: 56001
+          to: 63000
+        - channel: cr_wrr1
+          frm: 63001
+          to: 70000
+        - channel: cr_wrr1
+          frm: 70001
+          to: 77000
+        - channel: cr_wrr1
+          frm: 77001
+          to: 84000
+        - channel: cr_wrr1
+          frm: 84001
+          to: 91000
+        - channel: cr_wrr1
+          frm: 91001
+          to: 98000
+        - channel: cr_wrr1
+          frm: 98001
+          to: 105000
+        - channel: cr_wrr1
+          frm: 105001
+          to: 112000
+        - channel: cr_wrr1
+          frm: 112001
+          to: 119000
+        - channel: cr_wrr1
+          frm: 119001
+          to: 126000
+        - channel: cr_wrr1
+          frm: 126001
+          to: 133000
+        - channel: cr_wrr1
+          frm: 133001
+          to: 140000
+        - channel: cr_wrr1
+          frm: 140001
+          to: 142045
+        - channel: mybook22
+          frm: 1
+          to: 7000
+        - channel: mybook22
+          frm: 7001
+          to: 14000
+        - channel: mybook22
+          frm: 14001
+          to: 21000
+        - channel: mybook22
+          frm: 21001
+          to: 28000
+        - channel: mybook22
+          frm: 28001
+          to: 35000
+        - channel: mybook22
+          frm: 35001
+          to: 42000
+        - channel: mybook22
+          frm: 42001
+          to: 42477
+        - channel: golden_islamic_library_10_1987
+          frm: 1
+          to: 7000
+        - channel: golden_islamic_library_10_1987
+          frm: 7001
+          to: 14000
+        - channel: golden_islamic_library_10_1987
+          frm: 14001
+          to: 21000
+        - channel: golden_islamic_library_10_1987
+          frm: 21001
+          to: 28000
+        - channel: golden_islamic_library_10_1987
+          frm: 28001
+          to: 29925
+        - channel: storytelchat
+          frm: 1
+          to: 7000
+        - channel: storytelchat
+          frm: 7001
+          to: 14000
+        - channel: storytelchat
+          frm: 14001
+          to: 21000
+        - channel: storytelchat
+          frm: 21001
+          to: 23498
+        - channel: ilim_hizmeti
+          frm: 1
+          to: 7000
+        - channel: ilim_hizmeti
+          frm: 7001
+          to: 14000
+        - channel: ilim_hizmeti
+          frm: 14001
+          to: 18375
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Backfill shard
+      env:
+        INGEST_URL: ${{ secrets.INGEST_URL }}
+        INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+        CHANNEL_ONLY: ${{ matrix.channel }}
+        BACKFILL: '1'
+        SHARD: '1'
+        EMBED_FROM: ${{ matrix.frm }}
+        EMBED_TO: ${{ matrix.to }}
+        EMBED_BATCH: '8000'
+        EMBED_WORKERS: '5'
+      run: python crawler/crawl.py

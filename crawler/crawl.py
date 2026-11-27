@@ -282,7 +282,9 @@ def backfill_range(username, bot_member, scan_from, scan_to):
     except Exception as e:
         print(f"  cursor save failed: {e}", flush=True)
     print(f"== @{username}: {total_new} files from {scan_from}-{scanned_to}", flush=True)
-    if new_cursor > 1:
+    if os.environ.get("SHARD") == "1":
+        print("BACKFILL_DONE", flush=True)  # shard finished its window; never re-dispatch
+    elif new_cursor > 1:
         print(f"BACKFILL_INCOMPLETE remaining={new_cursor - 1}", flush=True)
     else:
         print("BACKFILL_DONE", flush=True)
