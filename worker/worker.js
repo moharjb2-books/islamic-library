@@ -314,10 +314,17 @@ async function suggestTitles(env, q, limit = 3) {
   const nq = norm(q);
   if (!nq || nq.length < 3 || nq.length > 80) return [];
   const rows = await env.DB.prepare(
-    'SELECT id, title, title_norm, file_name FROM files ORDER BY id DESC LIMIT 4000'
+    'SELECT id, title, title_norm, file_name FROM files ORDER BY id DESC LIMIT 3000'
   ).all();
+  const qwords = nq.split(/\s+/).filter(x => x.length >= 2).slice(0, 8);
+  if (!qwords.length) return [];
   const scored = [];
   for (const r of rows.results || []) {
+    const hay = (r.title_norm || '') + ' ' + norm(r.file_name || '');
+    const ctoks = hay.split(/[\s_\-–—.,()]+/).filter(t => t.length >= 2);
+    // cheap prefilter: share a token or a 4-char prefix before paying for edit distance
+    const hit = qwords.some(wd => ctoks.some(t => t.includes(wd) || wd.includes(t) || (wd.length >= 4 && t.length >= 4 && t.slice(0, 4) === wd.slice(0, 4))));
+    if (!hit) continue;
     const sc = Math.min(tokenScore(nq, r.title_norm || r.title), tokenScore(nq, norm(r.file_name || '')));
     if (sc <= 1.0) scored.push({ id: r.id, title: r.title, sc });
   }
