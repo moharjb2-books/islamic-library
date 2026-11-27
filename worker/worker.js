@@ -1153,6 +1153,13 @@ async function handleApi(env, request, path) {
       });
     }
 
+    if (path === '/api/admin/users') {
+      const rows = await env.DB.prepare(
+        'SELECT user_id, first_name, username, is_admin, blocked, first_seen, last_seen FROM users ORDER BY last_seen DESC LIMIT 100'
+      ).all();
+      return json({ users: rows.results || [] });
+    }
+
     if (path === '/api/admin/searches') {
       const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 300);
       const rows = await env.DB.prepare(

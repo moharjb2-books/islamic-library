@@ -514,6 +514,8 @@ async function loadAdmin() {
   }
   const sr = await api('/api/admin/searches?limit=60');
   state.admin.searches = sr.searches || [];
+  const ur = await api('/api/admin/users');
+  state.admin.usersList = ur.users || [];
   renderAdmin();
 }
 
@@ -531,6 +533,15 @@ function renderAdmin() {
     <div class="ch-row"><span class="cnt">نشط اليوم</span><span class="who">${a.active_today || 0}</span></div>
     <div class="ch-row"><span class="cnt">عمليات البحث (اليوم / الإجمالي)</span><span class="who">${a.searches_today || 0} / ${a.searches_total || 0}</span></div>
     <div class="ch-row"><span class="cnt">بحث بلا نتائج</span><span class="who">${a.searches_no_result || 0}</span></div>
+  </div>
+
+  <div class="panel"><h2>👥 الأعضاء</h2>
+    <div class="hint">كل من ضغط /start في البوت · اضغط الاسم لفتح حسابه</div>
+    ${(a.usersList || []).length ? a.usersList.map(u => `<div class="ch-row">
+      <span class="cnt">${new Date(u.last_seen * 1000).toLocaleString('ar-EG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}${u.is_admin ? ' · 👑' : ''}</span>
+      <span class="who" style="direction:ltr">${u.username ? '@' + esc(u.username) : '<span style="opacity:.6">بدون يوزر</span>'}</span>
+      <a class="who" style="color:var(--brand);font-weight:700;text-decoration:none" href="tg://user?id=${String(u.user_id).replace(/[^0-9]/g, '')}">${esc(u.first_name || 'مستخدم')} ‹</a>
+    </div>`).join('') : '<div class="hint">لا أعضاء بعد.</div>'}
   </div>
 
   <div class="panel"><h2>🔍 آخر عمليات البحث</h2>
