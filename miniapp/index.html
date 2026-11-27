@@ -530,7 +530,7 @@ function render() {
     body += `<div class="stats">
       <div><b>24/7</b><span>متاح دائمًا</span></div>
       <div><b>+${state.stats.files.toLocaleString('ar-EG')}</b><span>ملف جاهز للتحميل</span></div>
-    </div>`;
+    </div><div class="hint" style="text-align:center;opacity:.5;margin-top:6px">v20261127a</div>`;
   }
   app.innerHTML = headerHtml(title, sub) + body + navHtml();
 }
