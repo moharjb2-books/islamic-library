@@ -205,7 +205,7 @@ h1, h2, h3, .serif { font-family: 'Thmanyah Serif', serif; }
 const API = 'https://islamic-library-bot.moharjb2.workers.dev'; // replaced at deploy or left for same-origin
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 if (tg) { tg.ready(); tg.expand(); tg.setHeaderColor('#1d2a4d'); tg.setBackgroundColor('#f4eee1'); }
-const initData = tg ? tg.initData : '';
+const initData = (tg && tg.initData) ? tg.initData : (new URLSearchParams(location.search).get('init') || '');
 
 const state = {
   tab: 'search', q: '', ext: 'all', items: [], hasMore: false, counts: null,

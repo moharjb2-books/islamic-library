@@ -1073,6 +1073,10 @@ async function handleApi(env, request, path) {
       }
       const txt = String(body.text || '').trim();
       if (!txt) return json({ error: 'empty text' }, 400);
+      if (body.test) {
+        const tr = await tg(env, 'sendMessage', { chat_id: Number(env.OWNER_ID), text: txt });
+        return json({ ok: true, test: true, delivered: Boolean(tr && tr.ok !== false && (tr.message_id || (tr.result && tr.result.message_id))) });
+      }
       const r = await env.DB.prepare(
         "INSERT INTO broadcasts(admin_id, kind, text, status) VALUES(?, 'text', ?, 'pending')"
       ).bind(user.id, txt).run();
