@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.request
 import urllib.error
 
@@ -25,6 +26,8 @@ CHANNEL_ONLY = (os.environ.get("CHANNEL_ONLY") or "").strip().lower()
 BACKFILL = os.environ.get("BACKFILL") == "1"
 EMBED_FROM = int(os.environ.get("EMBED_FROM", "0"))
 EMBED_TO = int(os.environ.get("EMBED_TO", "0"))
+EMBED_BATCH = int(os.environ.get("EMBED_BATCH", "30000"))
+EMBED_WORKERS = int(os.environ.get("EMBED_WORKERS", "4"))
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -39,10 +42,17 @@ CAPTION_RE = re.compile(r'tgme_widget_message_caption[^>]*>(.*?)</div>', re.S)
 TAG_RE = re.compile(r"<[^>]+>")
 
 
-def get(url):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8", "replace")
+def get(url, tries=4):
+    last = None
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read().decode("utf-8", "replace")
+        except Exception as e:
+            last = e
+            time.sleep(min(2 ** i, 8) + 0.2)
+    raise last
 
 
 def post(path, payload):
@@ -128,6 +138,79 @@ def probe_max_id(username, hint=0):
     return lo
 
 
+
+def safe_embed(username, mid):
+    try:
+        return mid, embed_get(username, mid)
+    except Exception:
+        return mid, ""
+
+
+def parse_embed_doc(html, mid):
+    if not html or not embed_valid(html):
+        return None
+    title_m = DOC_TITLE_RE.search(html)
+    if not title_m:
+        return None
+    title = clean(title_m.group(1))
+    file_name = title[:500]
+    extra_m = DOC_EXTRA_RE.search(html)
+    extra = clean(extra_m.group(1)) if extra_m else ""
+    caption_m = CAPTION_RE.search(html)
+    caption = clean(caption_m.group(1)) if caption_m else ""
+    ext = ""
+    em = re.search(r"\.([A-Za-z0-9]{1,5})$", title)
+    if em:
+        ext = em.group(1).lower()
+        title = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", title).strip()
+    if caption and len(title) < 100:
+        title = title + " — " + caption[:80]
+    return {"message_id": mid, "title": title[:300], "file_name": file_name,
+            "author": author_from(caption or title), "ext": ext,
+            "size_bytes": parse_size(extra)}
+
+
+def backfill_range(username, bot_member, scan_from, scan_to):
+    print(f"== @{username} BACKFILL {scan_from}-{scan_to} ({scan_to - scan_from + 1} posts, {EMBED_WORKERS} workers)", flush=True)
+    total_new = 0
+    scanned_to = scan_to
+    items = []
+    with ThreadPoolExecutor(max_workers=EMBED_WORKERS) as ex:
+        for mid, html in ex.map(lambda m: safe_embed(username, m),
+                                range(scan_from, scan_to + 1), chunksize=8):
+            it = parse_embed_doc(html, mid)
+            if it:
+                items.append(it)
+            if len(items) >= 400:
+                items.sort(key=lambda x: x["message_id"])
+                try:
+                    r = post("", {"channel": username, "items": items, "bot_member": bot_member})
+                    total_new += r.get("added", 0)
+                except Exception as e:
+                    print(f"  ingest failed: {e}", flush=True)
+                items = []
+                print(f"  ...at {mid}, +{total_new} files", flush=True)
+    if items:
+        items.sort(key=lambda x: x["message_id"])
+        try:
+            r = post("", {"channel": username, "items": items, "bot_member": bot_member})
+            total_new += r.get("added", 0)
+        except Exception as e:
+            print(f"  ingest failed: {e}", flush=True)
+    new_cursor = scan_from
+    try:
+        post("", {"channel": username, "items": [], "bot_member": bot_member,
+                  "backfill_cursor": new_cursor})
+    except Exception as e:
+        print(f"  cursor save failed: {e}", flush=True)
+    print(f"== @{username}: {total_new} files from {scan_from}-{scanned_to}", flush=True)
+    if new_cursor > 1:
+        print(f"BACKFILL_INCOMPLETE remaining={new_cursor - 1}", flush=True)
+    else:
+        print("BACKFILL_DONE", flush=True)
+    return total_new
+
+
 def crawl_channel_embed(ch):
     username = ch["username"]
     last_seen = int(ch.get("last_message_id") or 0)
@@ -138,8 +221,16 @@ def crawl_channel_embed(ch):
         print(f"== @{username}: embed probe failed", flush=True)
         return 0
     if BACKFILL:
-        scan_from = max(1, EMBED_FROM or 1)
-        scan_to = min(EMBED_TO or max_id, max_id)
+        cursor = int(ch.get("backfill_cursor") or 0)
+        if cursor <= 0:
+            cursor = max_id + 1
+        scan_from = max(1, EMBED_FROM or (cursor - EMBED_BATCH))
+        scan_to = min(EMBED_TO or (cursor - 1), max_id)
+        if scan_to < scan_from:
+            print(f"== @{username}: BACKFILL_DONE", flush=True)
+            print("BACKFILL_DONE", flush=True)
+            return 0
+        return backfill_range(username, bot_member, scan_from, scan_to)
     elif last_seen <= 0:
         scan_from = max(1, max_id - EMBED_BACKFILL + 1)
     else:

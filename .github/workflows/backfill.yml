@@ -1,0 +1,82 @@
+name: Backfill channel catalogs
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Only this channel username (empty = all 35)"
+        required: false
+        default: ""
+
+permissions:
+  actions: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        channel:
+          - malek715711
+          - l_alnader1
+          - golden_islamic_library_10_1987
+          - shfaa456
+          - storytelchat
+          - gedolibrary_group1
+          - zad_islamic
+          - cr_wrr2
+          - quran_videos_zad
+          - quran_videos_zadmm
+          - cr_wrr3
+          - quran_videos_zadm
+          - cr_wrr5
+          - cr_wrr1
+          - mybook22
+          - ktbalfuzan
+          - amroelbosaty
+          - ebn_elqym
+          - aqsd_hcc1
+          - salafstime
+          - mergebooks
+          - ilim_hizmeti
+          - newbooksandeditions
+          - oyounalkotob
+          - kutubunmufidatun
+          - alshuwayer0
+          - alshawer
+          - ktbalfawzan
+          - ibnothaimeen_books
+          - cr_wrr
+          - ktbemambinbaz
+          - alslafy
+          - eilm51
+          - jalbani
+          - tahmilkutubwarosaililmiyah
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Backfill this channel
+        if: ${{ inputs.channel == '' || inputs.channel == matrix.channel }}
+        env:
+          INGEST_URL: ${{ secrets.INGEST_URL }}
+          INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
+          CHANNEL_ONLY: ${{ matrix.channel }}
+          BACKFILL: "1"
+          EMBED_BATCH: "40000"
+          EMBED_WORKERS: "4"
+        run: python crawler/crawl.py | tee crawl-out.txt
+      - name: Re-dispatch if incomplete
+        if: ${{ (inputs.channel == '' || inputs.channel == matrix.channel) && always() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! grep -q "BACKFILL_DONE" crawl-out.txt 2>/dev/null; then
+            echo "not done, re-dispatching ${{ matrix.channel }}"
+            gh workflow run backfill.yml -f channel="${{ matrix.channel }}"
+          else
+            echo "channel ${{ matrix.channel }} complete"
+          fi

@@ -31,6 +31,7 @@ const SCHEMA = [
     active INTEGER DEFAULT 1,
     added_at INTEGER DEFAULT (unixepoch()),
     last_message_id INTEGER DEFAULT 0,
+    backfill_cursor INTEGER DEFAULT 0,
     file_count INTEGER DEFAULT 0
   )`,
   `CREATE TABLE IF NOT EXISTS forced_channels (
@@ -82,6 +83,7 @@ async function migrate(env) {
   for (const stmt of SCHEMA) await env.DB.prepare(stmt).run();
   try { await env.DB.prepare('ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0').run(); } catch (e) {}
   try { await env.DB.prepare("ALTER TABLE files ADD COLUMN file_name TEXT DEFAULT ''").run(); } catch (e) {}
+  try { await env.DB.prepare('ALTER TABLE channels ADD COLUMN backfill_cursor INTEGER DEFAULT 0').run(); } catch (e) {}
   migrated = true;
 }
 
@@ -868,7 +870,7 @@ async function handleIngest(env, request) {
 
   if (request.method === 'GET' && url.pathname === '/ingest/sources') {
     const rows = await env.DB.prepare(
-      'SELECT username, last_message_id, bot_member FROM channels WHERE active = 1 ORDER BY username'
+      'SELECT username, last_message_id, bot_member, backfill_cursor FROM channels WHERE active = 1 ORDER BY username'
     ).all();
     return json({ channels: rows.results || [] }, 200, false);
   }
@@ -890,6 +892,10 @@ async function handleIngest(env, request) {
       file_id: String(it.file_id || ''), delivery,
     });
     if (r && r.meta && r.meta.changes > 0) added++;
+  }
+  if (channel && body.backfill_cursor) {
+    await env.DB.prepare('UPDATE channels SET backfill_cursor = ? WHERE username = ?')
+      .bind(Number(body.backfill_cursor), channel).run();
   }
   if (channel && body.last_message_id) {
     await env.DB.prepare(
