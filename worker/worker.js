@@ -484,11 +484,18 @@ async function iaSearch(env, q, limit = 3) {
       // Only real title matches: archive.org ranks by downloads, not relevance.
       .map(d => ({ ...d, rel: relScore(d.title, d.creator, q) }))
       .filter(d => d.rel > 0)
-      .sort((a, b) => b.rel - a.rel)
-      .slice(0, limit);
+      .sort((a, b) => b.rel - a.rel);
+    // Same book, different scans: collapse identical titles, keep the best match.
+    const seenT = new Set();
+    const dedup = docs.filter(d => {
+      const k = titleKey(d.title);
+      if (seenT.has(k)) return false;
+      seenT.add(k);
+      return true;
+    }).slice(0, limit);
     // Resolve a direct PDF/EPUB per item so the button downloads the book
     // itself, like a channel result, instead of opening a search page.
-    const items = await Promise.all(docs.map(async (d) => {
+    const items = await Promise.all(dedup.map(async (d) => {
       const title = String(d.title || d.identifier);
       const page = { title: title.slice(0, 45), url: base + '/details/' + d.identifier };
       try {
@@ -549,7 +556,7 @@ async function ajSearch(env, q, limit = 3) {
     const books = ((j && j.books) || []).slice(0, limit + 2).filter(b => b && b.id);
     const items = await Promise.all(books.map(async (b) => {
       const author = strip(b.author && b.author.name);
-      const rawTitle = strip(b.title);
+      const rawTitle = cleanTitle(strip(b.title));
       if (!sunniOk(rawTitle, author)) return null;
       const rel = relScore(rawTitle, author, q);
       if (!rel) return null;
