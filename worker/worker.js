@@ -212,7 +212,10 @@ function extFilterOk(e, ext, includeAudio) {
   return includeAudio || !aud;
 }
 async function snapPostings(word) {
-  const shard = await snapGet('/idx/' + encodeURIComponent(word.slice(0, 2)) + '.json');
+  let shard;
+  try { shard = await snapGet('/idx/' + encodeURIComponent(word.slice(0, 2)) + '.json'); }
+  catch (e) { return []; }  // no shard for this prefix = no matches
+  if (!shard || typeof shard !== 'object') return [];
   if (shard[word]) return shard[word];
   const out = [];
   for (const k of Object.keys(shard)) {
