@@ -21,6 +21,10 @@ MAX_PAGES = int(os.environ.get("MAX_PAGES", "25"))
 DELAY = float(os.environ.get("DELAY", "1.5"))
 EMBED_BACKFILL = int(os.environ.get("EMBED_BACKFILL", "150"))
 EMBED_MAX_SCAN = int(os.environ.get("EMBED_MAX_SCAN", "150"))
+CHANNEL_ONLY = (os.environ.get("CHANNEL_ONLY") or "").strip().lower()
+BACKFILL = os.environ.get("BACKFILL") == "1"
+EMBED_FROM = int(os.environ.get("EMBED_FROM", "0"))
+EMBED_TO = int(os.environ.get("EMBED_TO", "0"))
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -133,11 +137,15 @@ def crawl_channel_embed(ch):
     if not max_id:
         print(f"== @{username}: embed probe failed", flush=True)
         return 0
-    if last_seen <= 0:
+    if BACKFILL:
+        scan_from = max(1, EMBED_FROM or 1)
+        scan_to = min(EMBED_TO or max_id, max_id)
+    elif last_seen <= 0:
         scan_from = max(1, max_id - EMBED_BACKFILL + 1)
     else:
         scan_from = last_seen + 1
-    scan_to = min(max_id, scan_from + EMBED_MAX_SCAN - 1)
+    scan_to = min(max_id, scan_from + (EMBED_MAX_SCAN - 1 if not BACKFILL else max(0, scan_to - scan_from))) if not BACKFILL else scan_to
+    last_marker = None if BACKFILL else scan_to
     total_new = 0
     items = []
     for mid in range(scan_from, scan_to + 1):
@@ -168,8 +176,9 @@ def crawl_channel_embed(ch):
                       "size_bytes": parse_size(extra)})
         if len(items) >= 100:
             try:
-                r = post("", {"channel": username, "items": items,
-                              "bot_member": bot_member, "last_message_id": scan_to})
+                payload = {"channel": username, "items": items, "bot_member": bot_member}
+                if last_marker: payload["last_message_id"] = last_marker
+                r = post("", payload)
                 total_new += r.get("added", 0)
             except Exception as e:
                 print(f"  ingest failed: {e}", flush=True)
@@ -177,8 +186,9 @@ def crawl_channel_embed(ch):
         time.sleep(0.15)
     if items:
         try:
-            r = post("", {"channel": username, "items": items,
-                          "bot_member": bot_member, "last_message_id": scan_to})
+            payload = {"channel": username, "items": items, "bot_member": bot_member}
+            if last_marker: payload["last_message_id"] = last_marker
+            r = post("", payload)
             total_new += r.get("added", 0)
         except Exception as e:
             print(f"  ingest failed: {e}", flush=True)
@@ -191,6 +201,8 @@ def crawl_channel(ch):
     last_seen = int(ch.get("last_message_id") or 0)
     bot_member = bool(ch.get("bot_member"))
     print(f"== @{username} (last={last_seen}, member={bot_member})", flush=True)
+    if BACKFILL:
+        return crawl_channel_embed(ch)
     before = None
     total_new = 0
     max_id = last_seen
@@ -266,6 +278,8 @@ def main():
         return
     total = 0
     for ch in channels:
+        if CHANNEL_ONLY and ch["username"].lower() != CHANNEL_ONLY:
+            continue
         try:
             total += crawl_channel(ch)
         except Exception as e:

@@ -4,6 +4,23 @@ on:
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Only this channel username (empty = all)"
+        required: false
+        default: ""
+      backfill:
+        description: "Backfill mode (1 = scan from/to range)"
+        required: false
+        default: "0"
+      from_id:
+        description: "First message id (backfill)"
+        required: false
+        default: "0"
+      to_id:
+        description: "Last message id (backfill, 0 = latest)"
+        required: false
+        default: "0"
 
 jobs:
   crawl:
@@ -19,4 +36,8 @@ jobs:
           INGEST_SECRET: ${{ secrets.INGEST_SECRET }}
           MAX_PAGES: "25"
           DELAY: "1.5"
+          CHANNEL_ONLY: ${{ inputs.channel }}
+          BACKFILL: ${{ inputs.backfill }}
+          EMBED_FROM: ${{ inputs.from_id }}
+          EMBED_TO: ${{ inputs.to_id }}
         run: python crawler/crawl.py
