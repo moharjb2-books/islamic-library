@@ -658,6 +658,16 @@ async function suggestTitlesDB(env, q, limit = 3) {
   return rankScored(scored, limit, new Set());
 }
 
+// ---------- custom button icons (Telegram custom emoji pack owned by the bot) ----------
+const ICON = {
+  search: '5787597031270785832',
+  book: '5785239901679132333',
+  star: '5785259254801769652',
+  mega: '5787383056000098329',
+  info: '5787535952540868498',
+  dl: '5787650005397413705',
+};
+
 // ---------- file delivery ----------
 async function deliverFile(env, settings, chatId, file) {
   const protect = settings.protect_content === '1';
@@ -896,7 +906,7 @@ async function handleUpdate(env, update, ctx2) {
         await tg(env, 'sendMessage', {
           chat_id: chatId,
           text: '🛠 لوحة التحكم:',
-          reply_markup: { inline_keyboard: [[{ text: '🛠 فتح لوحة التحكم', web_app: { url: env.MINIAPP_URL + '?admin=1' }, style: 'primary' }]] },
+          reply_markup: { inline_keyboard: [[{ text: 'فتح لوحة التحكم', web_app: { url: env.MINIAPP_URL + '?admin=1' }, style: 'primary', icon_custom_emoji_id: ICON.info }]] },
         });
       } else {
         await tg(env, 'sendMessage', { chat_id: chatId, text: 'هذه المنطقة للمشرف فقط.' });
@@ -914,7 +924,7 @@ async function handleUpdate(env, update, ctx2) {
       if (!items.length) {
         let sug = [];
         try { sug = await suggestTitles(env, text, 3); } catch (e) {}
-        const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: `🔎 ${String(g.title).slice(0, 45)}`, callback_data: 'sq:' + g.id, style: 'primary' }]);
+        const kb = (sug || []).filter(g => g && g.title && g.id).map(g => [{ text: String(g.title).slice(0, 45), callback_data: 'sq:' + g.id, style: 'primary', icon_custom_emoji_id: ICON.search }]);
         await tg(env, 'sendMessage', {
           chat_id: chatId,
           text: `🔍 لم أجد نتائج مطابقة لـ«${text}».` + (sug.length ? '\n\nهل تقصد:' : '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.'),
@@ -923,14 +933,14 @@ async function handleUpdate(env, update, ctx2) {
         return;
       }
       const keyboard = items.map(f => {
-        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        const label = `${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') {
-          return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary' }];
+          return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary', icon_custom_emoji_id: ICON.book }];
         }
-        return [{ text: label, url: f.link, style: 'primary' }];
+        return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
-      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + items.length, style: 'primary' }]);
-      keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success' }]);
+      if (hasMore) keyboard.push([{ text: 'عرض المزيد', callback_data: 'more:' + items.length, style: 'primary', icon_custom_emoji_id: ICON.dl }]);
+      keyboard.push([{ text: 'تصفية النتائج في صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success', icon_custom_emoji_id: ICON.search }]);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
         text: `🔍 نتائج البحث عن «${text}»${hasMore ? ' — الصفحة الأولى من ' + items.length : ' — ' + items.length}:`,
@@ -969,9 +979,9 @@ async function handleUpdate(env, update, ctx2) {
         return;
       }
       const keyboard = items.map(f => {
-        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
-        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary' }];
-        return [{ text: label, url: f.link, style: 'primary' }];
+        const label = `${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary', icon_custom_emoji_id: ICON.book }];
+        return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
       await tg(env, 'sendMessage', { chat_id: chatId, text: '📚 أحدث الإضافات:', reply_markup: { inline_keyboard: keyboard } });
       return;
@@ -990,9 +1000,9 @@ async function handleUpdate(env, update, ctx2) {
         return;
       }
       const keyboard = items.map(f => {
-        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
-        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary' }];
-        return [{ text: label, url: f.link, style: 'primary' }];
+        const label = `${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary', icon_custom_emoji_id: ICON.book }];
+        return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
       await tg(env, 'sendMessage', { chat_id: chatId, text: '⭐ المفضلة:', reply_markup: { inline_keyboard: keyboard } });
       return;
@@ -1044,11 +1054,11 @@ async function handleUpdate(env, update, ctx2) {
         return;
       }
       const keyboard = items.map(f => {
-        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
-        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary' }];
-        return [{ text: label, url: f.link, style: 'primary' }];
+        const label = `${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary', icon_custom_emoji_id: ICON.book }];
+        return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
-      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + (off + items.length), style: 'primary' }]);
+      if (hasMore) keyboard.push([{ text: 'عرض المزيد', callback_data: 'more:' + (off + items.length), style: 'primary', icon_custom_emoji_id: ICON.dl }]);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
         text: `🔍 «${last.q}» — نتائج ${off + 1} إلى ${off + items.length}:`,
@@ -1092,7 +1102,7 @@ async function handleUpdate(env, update, ctx2) {
 }
 
 async function sendForced(env, chatId, missing) {
-  const buttons = missing.map(u => [{ text: `📢 اشترك: @${u}`, url: `https://t.me/${u}`, style: 'primary' }]);
+  const buttons = missing.map(u => [{ text: `اشترك: @${u}`, url: `https://t.me/${u}`, style: 'primary', icon_custom_emoji_id: ICON.mega }]);
   buttons.push([{ text: '✅ اشتركت، تحقق', callback_data: 'recheck', style: 'success' }]);
   await tg(env, 'sendMessage', {
     chat_id: chatId,
@@ -1108,13 +1118,13 @@ async function sendWelcome(env, settings, chatId) {
     `ابحث عن أي كتاب أو ملف باسمه، وسأحضره لك فورًا من المكتبة.\n\n` +
     `أرسل اسم الكتاب مباشرة في المحادثة، أو افتح صفحة البحث لتصفية النتائج حسب النوع والحجم.`;
   const lastRow = [];
-  if (env.MAIN_CHANNEL) lastRow.push({ text: '📢 القناة الرئيسية', url: 'https://t.me/' + env.MAIN_CHANNEL, style: 'primary' });
-  lastRow.push({ text: 'ℹ️ طريقة الاستخدام', callback_data: 'help', style: 'primary' });
+  if (env.MAIN_CHANNEL) lastRow.push({ text: 'القناة الرئيسية', url: 'https://t.me/' + env.MAIN_CHANNEL, style: 'primary', icon_custom_emoji_id: ICON.mega });
+  lastRow.push({ text: 'طريقة الاستخدام', callback_data: 'help', style: 'primary', icon_custom_emoji_id: ICON.info });
   const keyboard = [
-    [{ text: '🔍 فتح صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success' }],
+    [{ text: 'فتح صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success', icon_custom_emoji_id: ICON.search }],
     [
-      { text: '🆕 أحدث الإضافات', callback_data: 'latest', style: 'primary' },
-      { text: '⭐ المفضلة', callback_data: 'favs', style: 'primary' },
+      { text: 'أحدث الإضافات', callback_data: 'latest', style: 'primary', icon_custom_emoji_id: ICON.book },
+      { text: 'المفضلة', callback_data: 'favs', style: 'primary', icon_custom_emoji_id: ICON.star },
     ],
     lastRow,
   ];
