@@ -366,17 +366,17 @@ async function doSearch() {
   if (document.getElementById('results')) updateSearchResults(); else render();
   const r = await api(`/api/search?q=${encodeURIComponent(q)}&ext=${state.ext}`);
   if (q !== state.q) return;
-  state.items = r.items || []; state.hasMore = r.hasMore; state.counts = r.counts || null; state.suggestions = r.suggestions || null;
+  state.items = r.items || []; state.hasMore = r.hasMore; state.counts = r.counts || null; state.suggestions = r.suggestions || null; state.external = r.external || null;
   state.loading = false;
   if (document.getElementById('results')) updateSearchResults(); else render();
 }
 async function loadLatest() {
   const r = await api('/api/latest');
-  state.items = r.items || []; state.hasMore = r.hasMore; state.counts = null; state.suggestions = null; render();
+  state.items = r.items || []; state.hasMore = r.hasMore; state.counts = null; state.suggestions = null; state.external = null; render();
 }
 async function loadFavs() {
   const r = await api('/api/favs');
-  state.items = r.items || []; state.counts = null; state.hasMore = false; state.suggestions = null;
+  state.items = r.items || []; state.counts = null; state.hasMore = false; state.suggestions = null; state.external = null;
   (r.items || []).forEach(f => state.favs[f.id] = true);
   render();
 }
@@ -443,7 +443,11 @@ function resultsHtml() {
         ${state.suggestions.map((g, i) => `<button onclick="pickSug(${i})">🔎 ${g.title.replace(/</g, '&lt;')}</button>`).join('')}
         </div>`
       : '<br>جرّب اسمًا أقصر أو جزءًا منه.';
-    return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.` + sugHtml + extLinksHtml(state.q) + `</div>`;
+    const iaHtml = (state.external && state.external.length)
+      ? `<div class="sug"><div class="sug-lbl">🌐 تحميل مباشر من archive.org:</div>`
+        + state.external.map(e2 => `<button onclick="openExtLib('${String(e2.url).replace(/'/g, '%27')}')">⬇️ ${String(e2.title).replace(/</g, '&lt;')}</button>`).join('') + `</div>`
+      : '';
+    return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.` + sugHtml + iaHtml + extLinksHtml(state.q) + `</div>`;
   }
   const head = state.q ? `<div class="sec-head"><h2>نتائج البحث</h2></div>`
     : (state.tab === 'search' ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '');

@@ -470,9 +470,33 @@ async function iaSearch(env, q, limit = 3) {
   try {
     const r = await fetch(u.toString(), { signal: ctrl.signal, headers: { 'user-agent': 'IslamicLibraryBot/1.0 (+https://t.me/ISLAMIC_BOOKS_LIBbot)' } });
     const j = await r.json();
-    const items = ((j.response && j.response.docs) || []).slice(0, limit)
-      .filter(d => d && d.identifier)
-      .map(d => ({ title: String(d.title || d.identifier).slice(0, 45), url: 'https://archive.org/details/' + d.identifier }));
+    const docs = ((j.response && j.response.docs) || []).slice(0, limit).filter(d => d && d.identifier);
+    // Resolve a direct PDF/EPUB per item so the button downloads the book
+    // itself, like a channel result, instead of opening a search page.
+    const items = await Promise.all(docs.map(async (d) => {
+      const title = String(d.title || d.identifier);
+      const page = { title: title.slice(0, 45), url: base + '/details/' + d.identifier };
+      try {
+        const c2 = new AbortController();
+        const t2 = setTimeout(() => c2.abort(), 2000);
+        try {
+          const mres = await fetch(`${base}/metadata/${encodeURIComponent(d.identifier)}`, { signal: c2.signal, headers: { 'user-agent': 'IslamicLibraryBot/1.0 (+https://t.me/ISLAMIC_BOOKS_LIBbot)' } });
+          const m = await mres.json();
+          const files = (m.files || []).filter(f => /\.(pdf|epub)$/i.test(f.name || ''));
+          const pick =
+            files.find(f => String(f.name || '').toLowerCase() === (d.identifier + '.pdf').toLowerCase()) ||
+            files.find(f => /_text\.pdf$/i.test(f.name || '')) ||
+            files.find(f => /\.pdf$/i.test(f.name || '') && !/_bw\.pdf$/i.test(f.name || '')) ||
+            files[0];
+          if (!pick) return page;
+          const mb = pick.size ? Math.round(Number(pick.size) / 1e6) : 0;
+          return {
+            title: title.slice(0, 30) + (mb ? ` · ${mb}MB` : ''),
+            url: `${base}/download/${encodeURIComponent(d.identifier)}/${encodeURIComponent(pick.name)}`,
+          };
+        } finally { clearTimeout(t2); }
+      } catch (e) { return page; }
+    }));
     iaCache.set(key, { at: Date.now(), items });
     if (iaCache.size > 500) iaCache.clear();
     return items;
@@ -988,7 +1012,7 @@ async function handleUpdate(env, update, ctx2) {
           chat_id: chatId,
           text: `🔍 لم أجد نتائج مطابقة لـ«${text}».`
             + (sug.length ? '\n\nهل تقصد:' : '')
-            + (ext.length ? '\n\n🌐 من مكتبة الإنترنت archive.org (روابط خارجية):' : '')
+            + (ext.length ? '\n\n🌐 تحميل مباشر من archive.org:' : '')
             + '\n\n🔗 أو ابحث في مكتبات سنّية موثوقة:'
             + (!sug.length && !ext.length ? '\nجرّب اسمًا أقصر أو جزءًا من اسم الكتاب أو المؤلف.' : ''),
           reply_markup: kb.length ? { inline_keyboard: kb } : undefined,
@@ -1342,8 +1366,16 @@ async function handleApi(env, request, path, ctx2) {
     }
     const counts = q ? await countExt(env, q) : null;
     let suggestions = null;
-    if (q && !items.length) { try { suggestions = await suggestTitles(env, q, 3); } catch (e) {} }
-    return json({ items: items.map(publicFile), hasMore, counts, suggestions });
+    let external = null;
+    if (q && !items.length) {
+      const [sug2, ext2] = await Promise.all([
+        suggestTitles(env, q, 3).catch(() => []),
+        iaSearch(env, q, 3).catch(() => []),
+      ]);
+      suggestions = sug2;
+      external = ext2;
+    }
+    return json({ items: items.map(publicFile), hasMore, counts, suggestions, external });
   }
 
   if (path === '/api/me') {

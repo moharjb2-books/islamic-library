@@ -38,9 +38,15 @@ const snapServer = http.createServer(async (req, res) => {
 });
 await new Promise(r => snapServer.listen(8792, r));
 
-// ---- mock Internet Archive advancedsearch ----
+// ---- mock Internet Archive advancedsearch + metadata ----
 const iaServer = http.createServer((req, res) => {
   res.setHeader('content-type', 'application/json');
+  const u = new URL(req.url, 'http://x');
+  if (u.pathname.startsWith('/metadata/')) {
+    const id = decodeURIComponent(u.pathname.slice('/metadata/'.length));
+    if (id === 'tafsir-ibn-kathir-01') return res.end(JSON.stringify({ files: [{ name: 'tafsir_text.pdf', size: '12000000' }] }));
+    return res.end(JSON.stringify({ files: [] }));
+  }
   res.end(JSON.stringify({ response: { numFound: 2, docs: [
     { identifier: 'tafsir-ibn-kathir-01', title: 'تفسير ابن كثير ط العلمية', creator: 'ابن كثير' },
     { identifier: 'another-book-02', title: 'كتاب آخر', creator: null },
@@ -256,7 +262,8 @@ for (const [p, b] of [
   await new Promise(r => setTimeout(r, 400));
   const m = tgCalls.find(c => c.method === 'sendMessage' && c.body.chat_id === 12345);
   const mk = m ? JSON.stringify(m.body.reply_markup || {}) : '';
-  check('not-found also offers archive.org links (federated fallback)', Boolean(m) && /archive.org/.test(m.body.text || '') && mk.includes('archive.org/details/tafsir-ibn-kathir-01'), JSON.stringify(m && m.body).slice(0, 300));
+  check('not-found also offers archive.org direct-download links (federated fallback)', Boolean(m) && /archive.org/.test(m.body.text || '') && mk.includes('/download/tafsir-ibn-kathir-01/tafsir_text.pdf'), JSON.stringify(m && m.body).slice(0, 300));
+  check('IA item without files falls back to its details page', mk.includes('/details/another-book-02'), mk.slice(0, 300));
   check('not-found offers Sunni external-library search links', mk.includes('shamela.ws/search?q=') && mk.includes('waqfeya.net/search?q=') && mk.includes('dorar.net/site/search?skeys=') && mk.includes('islamhouse.com/ar/search/'), mk.slice(0, 300));
 }
 
