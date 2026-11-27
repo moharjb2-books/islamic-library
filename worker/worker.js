@@ -184,6 +184,60 @@ async function getSettings(env) {
   return settingsCache.s || s;
 }
 
+
+// ---------- relevance scoring (shared by both suggesters) ----------
+// Per query word, best match quality against a row's title/author tokens:
+// exact 1.0, prefix 0.85, contained 0.7, typo(1) 0.6, typo(2) 0.4.
+// Rows rank by token coverage first (every query word matched beats one
+// strong match), then total quality; author matches add a small bonus.
+function wordQuality(w, titleToks, authorToks) {
+  let best = 0;
+  for (const t of titleToks) {
+    let q = 0;
+    if (t === w) q = 1.0;
+    else if (t.startsWith(w) || w.startsWith(t)) q = 0.85;
+    else if (t.includes(w)) q = 0.7;
+    else if (t[0] === w[0] && Math.abs(t.length - w.length) <= 3) {
+      const d = editDist(w, t, 2);
+      q = d === 1 ? 0.6 : d === 2 ? 0.4 : 0;
+    }
+    if (q > best) best = q;
+    if (best === 1) break;
+  }
+  let abest = 0;
+  for (const t of authorToks) {
+    if (t === w) { abest = 1; break; }
+    if (t.startsWith(w) || t.includes(w)) abest = Math.max(abest, 0.9);
+  }
+  return { title: best, author: abest };
+}
+function scoreRow(words, titleNorm, authorNorm) {
+  const titleToks = (titleNorm || '').split(/\s+/).filter(Boolean).slice(0, 40);
+  const authorToks = (authorNorm || '').split(/\s+/).filter(Boolean).slice(0, 12);
+  let cover = 0, total = 0, authorHit = 0;
+  for (const w of words) {
+    const q = wordQuality(w, titleToks, authorToks);
+    if (q.title > 0 || q.author > 0) cover++;
+    total += Math.max(q.title, q.author * 0.95);
+    if (q.author > 0) authorHit = 1;
+  }
+  return { cover, score: total + authorHit * 0.3 };
+}
+function rankScored(rows, limit, seenT) {
+  rows.sort((a, b) => b.cover - a.cover || b.score - a.score);
+  const out = [];
+  for (const r of rows) {
+    const pt = r.pretty;
+    if (!pt) continue;
+    const key = pt.replace(/[\d٠-٩]+\s*$/, '').trim();
+    if (seenT.has(key)) continue;
+    seenT.add(key);
+    out.push({ id: r.id, title: pt });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 // ---------- snapshot fallback (static search while D1 is unavailable) ----------
 // The Mini App repo (GitHub Pages) hosts a sharded snapshot built from a D1
 // export: an inverted index (idx/), row chunks (rows/) and an id map (byid/).
@@ -295,57 +349,66 @@ async function snapGetFileById(id) {
   return r ? snapRowFile(r) : null;
 }
 async function snapSuggest(q, limit) {
-  const nq = norm(q);
-  const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 4)
-    .sort((a, b) => b.length - a.length).slice(0, 2).map(x => x.slice(0, 20));
-  if (!qwords.length) return [];
-  const out = [];
-  const seenT = new Set();
-  const chunks = {};
-  let fetches = 0;
-  for (const w of qwords) {
-    if (out.length >= limit || fetches >= 6) break;
+  const words = norm(q).split(/\s+/).filter(x => x.length >= 2).slice(0, 6).map(x => x.slice(0, 20));
+  if (!words.length) return [];
+  // Per word: matched index tokens (exact/prefix/typo) with quality and size.
+  const perWord = [];
+  for (const w of words) {
     let shard;
     try { shard = await snapGet('/idx/' + encodeURIComponent(w.slice(0, 2)) + '.json'); }
-    catch (e) { continue; }
-    const scored = [];
-    let budget = 1500;
+    catch (e) { perWord.push({ w, tokens: [] }); continue; }
+    const tokens = [];
+    let budget = 1200;
     for (const k of Object.keys(shard)) {
-      if (k.length < 3) continue;
-      if (k.includes(w) || w.includes(k)) { scored.push([Math.abs(k.length - w.length) > 2 ? 1 : 0, k]); continue; }
-      if (k[0] !== w[0] || Math.abs(k.length - w.length) > 3) continue;
-      if (budget-- <= 0) break;
-      scored.push([editDist(w, k, 3), k]);
-    }
-    scored.sort((a, b) => a[0] - b[0] || a[1].length - b[1].length);
-    // Per token, sample its newest postings and keep the shortest title that
-    // still contains it: collection-prefixed dumps lose to clean book names.
-    for (const s of scored) {
-      if (s[0] > 2 || out.length >= limit || fetches >= 6) break;
-      const posts = shard[s[1]];
-      if (!posts || !posts.length) continue;
-      let best = null;
-      for (const g of posts.slice(-8)) {
-        const ci = Math.floor(g / 500);
-        if (!chunks[ci]) {
-          if (fetches >= 6) continue;
-          try { chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json'); fetches++; }
-          catch (e) { continue; }
-        }
-        const r = chunks[ci][g % 500];
-        if (!r) continue;
-        const title = String(r[1] || '').trim();
-        if (!title || !norm(title).includes(s[1])) continue;
-        if (!best || title.length < best.title.length) best = { id: r[0], title };
+      if (k.length < 2) continue;
+      let q = 0;
+      if (k === w) q = 1.0;
+      else if (k.startsWith(w)) q = 0.85;
+      else if (k.includes(w) && w.length >= 3) q = 0.7;
+      else if (k[0] === w[0] && Math.abs(k.length - w.length) <= 3) {
+        if (budget-- <= 0) break;
+        const d = editDist(w, k, 2);
+        q = d === 1 ? 0.6 : d === 2 ? 0.4 : 0;
       }
-      if (!best) continue;
-      const pt = prettyTitle(best.title);
-      if (seenT.has(pt)) continue;
-      seenT.add(pt);
-      out.push({ id: best.id, title: pt });
+      if (q > 0) tokens.push({ t: k, q, n: shard[k].length });
     }
+    tokens.sort((a, b) => b.q - a.q || b.n - a.n);
+    perWord.push({ w, tokens: tokens.slice(0, 6) });
   }
-  return out;
+  // Candidate rows come from the RAREST word's best tokens (bounded), then
+  // every candidate is scored against ALL query words, coverage first.
+  const ranked = perWord.filter(p => p.tokens.length)
+    .map(p => ({ ...p, size: p.tokens.reduce((a, t) => a + Math.min(t.n, 50) * t.q, 0) }))
+    .sort((a, b) => a.size - b.size);
+  if (!ranked.length) return [];
+  const rare = ranked[0];
+  const candIdx = [];
+  for (const t of rare.tokens) {
+    const shard = await snapGet('/idx/' + encodeURIComponent(t.t.slice(0, 2)) + '.json').catch(() => null);
+    const posts = shard ? shard[t.t] : null;
+    if (!posts) continue;
+    for (const g of posts.slice(-150)) candIdx.push(g);
+    if (candIdx.length >= 400) break;
+  }
+  const chunks = {};
+  let fetches = 0;
+  const scoredRows = [];
+  for (const g of candIdx.slice(0, 400)) {
+    const ci = Math.floor(g / 500);
+    if (!chunks[ci]) {
+      if (fetches >= 8) break;
+      try { chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json'); fetches++; }
+      catch (e) { continue; }
+    }
+    const r = chunks[ci][g % 500];
+    if (!r) continue;
+    const title = String(r[1] || '').trim();
+    if (!title) continue;
+    const s = scoreRow(words, norm(title), norm(String(r[3] || '')));
+    if (s.cover === 0 || s.score < 0.8) continue;
+    scoredRows.push({ id: r[0], pretty: prettyTitle(title), ...s });
+  }
+  return rankScored(scoredRows, limit, new Set());
 }
 async function getFileById(env, id) {
   if (!snapOn) {
@@ -562,158 +625,37 @@ function prettyTitle(t) {
 }
 
 async function suggestTitlesDB(env, q, limit = 3) {
-  const nq = norm(q);
-  if (!nq || nq.length < 3 || nq.length > 80) return [];
-  const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 6);
-  if (!qwords.length) return [];
-  // SQL-side candidate pull: D1 scans, the worker only scores a bounded set.
-  const mainW = qwords.slice().sort((a, b) => b.length - a.length)[0].slice(0, 20);
-  const prefix = mainW.slice(0, 4);
+  const words = norm(q).split(/\s+/).filter(x => x.length >= 2).slice(0, 6).map(x => x.slice(0, 20));
+  if (!words.length) return [];
+  // Candidates: rows matching ANY word (prefix on each), scored against ALL
+  // words in JS. FTS exact tokens do not cover typos; a trigram FTS table is
+  // queued post-ingest to make D1-side matching fully typo-tolerant.
   let rows;
+  const orQ = words.map(w => '"' + w.replace(/"/g, '') + '" OR "' + w.replace(/"/g, '') + '"*').join(' OR ');
   if (ftsOk) {
     rows = await env.DB.prepare(
-      `SELECT f.id, f.title, f.title_norm, f.file_name FROM files f
+      `SELECT f.id, f.title, f.title_norm, f.file_name, f.author_norm FROM files f
        JOIN files_fts x ON x.rowid = f.id
-       WHERE files_fts MATCH ? ORDER BY f.id DESC LIMIT 150`
-    ).bind('"' + mainW.replace(/"/g, '') + '" OR "' + prefix.replace(/"/g, '') + '"*').all();
+       WHERE files_fts MATCH ? ORDER BY f.id DESC LIMIT 250`
+    ).bind(orQ).all();
   } else {
+    const where = words.map(() => '(title_norm LIKE ? OR author_norm LIKE ?)').join(' OR ');
+    const binds = [];
+    for (const w of words) { binds.push(`%${w}%`, `%${w}%`); }
     rows = await env.DB.prepare(
-      `SELECT id, title, title_norm, file_name FROM files
-       WHERE title_norm LIKE ? OR title_norm LIKE ?
-       ORDER BY id DESC LIMIT 150`
-    ).bind(`%${mainW}%`, `%${prefix}%`).all();
+      `SELECT id, title, title_norm, file_name, author_norm FROM files WHERE ${where}
+       ORDER BY id DESC LIMIT 250`
+    ).bind(...binds).all();
   }
-  // score in JS with tokens normed once per candidate, and a global editDist budget
-  let distBudget = 2500;
   const scored = [];
   for (const r of rows.results || []) {
-    const candTokens = ((r.title_norm || '') + ' ' + norm(r.file_name || ''))
-      .split(/[\s_\-\u2013\u2014.,()]+/).filter(t => t.length >= 2).slice(0, 40);
-    if (!candTokens.length) continue;
-    let total = 0;
-    for (const w of qwords) {
-      let best = 4;
-      for (const nc of candTokens) {
-        if (nc.length >= 3 && w.length >= 3 && (nc.includes(w) || w.includes(nc))) {
-          best = Math.min(best, Math.abs(nc.length - w.length) > 2 ? 0.5 : 0); continue;
-        }
-        if (nc[0] !== w[0] || Math.abs(nc.length - w.length) > 3) continue;
-        if (distBudget <= 0) continue;
-        distBudget--;
-        best = Math.min(best, editDist(w, nc, 3));
-        if (best === 0) break;
-      }
-      total += best;
-    }
-    const sc = total / qwords.length;
-    if (sc <= 1.0) scored.push({ id: r.id, title: r.title, sc });
+    const title = String(r.title || r.file_name || '').trim();
+    if (!title) continue;
+    const s = scoreRow(words, (r.title_norm || '') + ' ' + norm(r.file_name || ''), r.author_norm || '');
+    if (s.cover === 0 || s.score < 0.8) continue;
+    scored.push({ id: r.id, pretty: prettyTitle(title), ...s });
   }
-  scored.sort((a, b) => a.sc - b.sc);
-  const seen = new Set();
-  const out = [];
-  for (const t of scored) {
-    const k = norm(t.title);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push({ id: t.id, title: prettyTitle(t.title) });
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-// ---------- Telegram Desktop export ingest (owner only) ----------
-function exportText(t) {
-  if (!t) return '';
-  if (typeof t === 'string') return t.trim();
-  if (Array.isArray(t)) return t.map(p => (typeof p === 'string' ? p : (p && p.text) || '')).join('').trim();
-  return '';
-}
-
-function exportSize(m2) {
-  let sz = Number(m2.file_size) || 0;
-  if (!sz && typeof m2.file === 'string') {
-    const sm = /\(([\d.,]+)\s*(B|KB|MB|GB)\)/i.exec(m2.file);
-    if (sm) sz = Math.round(parseFloat(sm[1].replace(',', '.')) * ({ B: 1, KB: 1024, MB: 1048576, GB: 1073741824 })[sm[2].toUpperCase()]);
-  }
-  return sz || 0;
-}
-
-async function handleExportIngest(env, chatId, msg) {
-  const caption = msg.caption || '';
-  const mCap = /@([A-Za-z0-9_]{3,})/.exec(caption) || /t\.me\/([A-Za-z0-9_]{3,})/.exec(caption);
-  const username = mCap ? mCap[1].toLowerCase() : '';
-  if (!username) {
-    await tg(env, 'sendMessage', { chat_id: chatId, text: '📄 استلمت ملف التصدير، لكن أحتاج يوزر القناة.\nأعد إرسال الملف واكتب في التعليق يوزر القناة، مثل: @cr_wrr' });
-    return;
-  }
-  const ch = await env.DB.prepare('SELECT username, bot_member FROM channels WHERE username = ?').bind(username).first();
-  if (!ch) {
-    await tg(env, 'sendMessage', { chat_id: chatId, text: `⚠️ القناة @${username} غير مسجّلة في المكتبة.` });
-    return;
-  }
-  const fsize = msg.document.file_size || 0;
-  if (fsize > 19 * 1024 * 1024) {
-    await tg(env, 'sendMessage', { chat_id: chatId, text: `⚠️ الملف كبير (${fmtSize(fsize)}). الحد الأقصى للإرسال المباشر 19 MB.\n\nالبديل: ارفع الملف إلى Google Drive (مشاركة: أي شخص لديه الرابط) وأرسل الرابط هنا مع يوزر القناة، وسأفهرسه تلقائيًا.` });
-    return;
-  }
-  const gf = await tg(env, 'getFile', { file_id: msg.document.file_id });
-  if (!gf || !gf.file_path) {
-    await tg(env, 'sendMessage', { chat_id: chatId, text: '⚠️ تعذّر تنزيل الملف من تيليجرام. جرّب رفعه كرابط Drive بدلًا من ذلك.' });
-    return;
-  }
-  const resp = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${gf.file_path}`);
-  const data = resp.ok ? await resp.json().catch(() => null) : null;
-  if (!data || !Array.isArray(data.messages)) {
-    await tg(env, 'sendMessage', { chat_id: chatId, text: '⚠️ هذا ليس ملف تصدير تيليجرام صالحًا (result.json).' });
-    return;
-  }
-  const msgs = data.messages;
-  let docs = 0;
-  for (const m2 of msgs) {
-    if (m2 && m2.type === 'message' && (m2.media_type === 'document' || m2.media_type === 'audio' || m2.media_type === 'voice' || m2.file_name)) docs++;
-  }
-  if (msgs.length > 60000) {
-    await tg(env, 'sendMessage', { chat_id: chatId, text: `⚠️ التصدير ضخم (${msgs.length.toLocaleString('en')} رسالة). الأفضل رفعه كرابط Drive وإرساله هنا مع يوزر القناة.` });
-    return;
-  }
-  let added = 0;
-  const batch = [];
-  for (const m2 of msgs) {
-    if (!m2 || m2.type !== 'message') continue;
-    const fname = String(m2.file_name || '').slice(0, 500);
-    const isDoc = m2.media_type === 'document' || m2.media_type === 'audio' || m2.media_type === 'voice' || fname;
-    if (!isDoc) continue;
-    const txt = exportText(m2.text);
-    const title = (fname || txt || 'ملف').slice(0, 300);
-    const ext0 = extOf(fname) || (m2.media_type === 'audio' || m2.media_type === 'voice' ? 'audio' : '');
-    batch.push(env.DB.prepare(
-      `INSERT INTO files(title, title_norm, file_name, author, author_norm, ext, size_bytes, channel, message_id, link, file_id, delivery)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-       ON CONFLICT(channel, message_id, title_norm) DO UPDATE SET
-         file_name = CASE WHEN excluded.file_name != '' THEN excluded.file_name ELSE files.file_name END,
-         size_bytes = CASE WHEN excluded.size_bytes > 0 THEN excluded.size_bytes ELSE files.size_bytes END`
-    ).bind(
-      title, norm(title), fname, extractAuthor(txt, fname) || '', norm(extractAuthor(txt, fname) || ''), ext0,
-      exportSize(m2), username, Number(m2.id) || 0, `https://t.me/${username}/${m2.id}`, '',
-      ch.bot_member ? 'copy' : 'link'
-    ));
-    if (batch.length >= 90) {
-      const res = await env.DB.batch(batch.splice(0));
-      for (const r of res) if (r.meta && r.meta.changes > 0) added++;
-    }
-  }
-  if (batch.length) {
-    const res = await env.DB.batch(batch);
-    for (const r of res) if (r.meta && r.meta.changes > 0) added++;
-  }
-  const maxId = msgs.reduce((a, m2) => Math.max(a, Number(m2 && m2.id) || 0), 0);
-  if (maxId) await env.DB.prepare('UPDATE channels SET last_message_id = MAX(last_message_id, ?) WHERE username = ?').bind(maxId, username).run();
-  const c = await env.DB.prepare('SELECT COUNT(*) AS c FROM files WHERE channel = ?').bind(username).first();
-  await env.DB.prepare('UPDATE channels SET file_count = ? WHERE username = ?').bind(c.c || 0, username).run();
-  await tg(env, 'sendMessage', {
-    chat_id: chatId,
-    text: `✅ تمت فهرسة ${added.toLocaleString('en')} ملفًا من @${username} (من أصل ${docs.toLocaleString('en')} مستند في التصدير).\n📦 التسليم: ${ch.bot_member ? 'إرسال مباشر (البوت مشرف)' : 'روابط'}.`,
-  });
+  return rankScored(scored, limit, new Set());
 }
 
 // ---------- file delivery ----------

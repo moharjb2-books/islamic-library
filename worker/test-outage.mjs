@@ -131,5 +131,25 @@ const sR = await worker.fetch(new Request('http://local/api/search?q=' + encodeU
 const sJ = await sR.json();
 check('api suggestions are {id,title} rows', Array.isArray(sJ.suggestions) && sJ.suggestions.length > 0 && Boolean(sJ.suggestions[0].id && sJ.suggestions[0].title), JSON.stringify(sJ.suggestions).slice(0, 200));
 
+// ---- the user's typo-test set (snapshot suggester quality) ----
+async function apiSearch(q) {
+  const r = await worker.fetch(new Request('http://local/api/search?q=' + encodeURIComponent(q)), env, ctx());
+  return r.json();
+}
+let j = await apiSearch('ابن كثيرر');
+check("'ابن كثيرر' suggests ابن كثير books first", Boolean(j.suggestions && j.suggestions[0] && j.suggestions[0].title.includes('ابن كثير')), JSON.stringify(j.suggestions || j.items && j.items.slice(0,2)));
+j = await apiSearch('تفسير ابن كثيرر');
+check("'تفسير ابن كثيرر' top suggestion is تفسير ابن كثير", Boolean(j.suggestions && j.suggestions[0] && /تفسير ابن كثير/.test(j.suggestions[0].title)), JSON.stringify(j.suggestions));
+j = await apiSearch('صحيح البخارى');
+check("'صحيح البخارى' (ى typo) finds results directly", Boolean(j.items && j.items.length > 0 && /البخاري/.test(j.items[0].title + j.items[0].file_name)), JSON.stringify((j.items||[]).slice(0,1)));
+j = await apiSearch('رياض الصالحين');
+check("'رياض الصالحين' finds results directly", Boolean(j.items && j.items.length > 0), JSON.stringify((j.items||[]).slice(0,1)));
+j = await apiSearch('رياض الصالحيين');
+check("'رياض الصالحيين' suggests رياض الصالحين", Boolean(j.suggestions && j.suggestions[0] && j.suggestions[0].title.includes('رياض الصالحين')), JSON.stringify(j.suggestions));
+j = await apiSearch('مقمدة ابن خلدونن');
+check("'مقمدة ابن خلدونن' suggests خلدون books", Boolean(j.suggestions && j.suggestions[0] && /خلدون/.test(j.suggestions[0].title)), JSON.stringify(j.suggestions));
+j = await apiSearch('صحيح مسلمم');
+check("'صحيح مسلمم' suggests صحيح مسلم", Boolean(j.suggestions && j.suggestions[0] && /مسلم/.test(j.suggestions[0].title)), JSON.stringify(j.suggestions));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
