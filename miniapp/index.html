@@ -96,8 +96,8 @@ h1, h2, h3, .serif { font-family: 'Thmanyah Serif', serif; }
   box-shadow: inset 0 -6px 14px rgba(0,0,0,.15);
 }
 .card .info { flex: 1; min-width: 0; }
-.card h3 { font-size: 16.5px; line-height: 1.45; margin-bottom: 3px; }
-.card .fname { font-size: 12.5px; color: var(--ink); opacity: .75; word-break: break-all; line-height: 1.5; margin-bottom: 2px; }
+.card h3 { font-size: 16.5px; line-height: 1.45; margin-bottom: 3px; overflow-wrap: anywhere; word-break: break-word; }
+.card .fname { font-size: 12.5px; color: var(--ink); opacity: .75; overflow-wrap: anywhere; word-break: break-word; line-height: 1.5; margin-bottom: 2px; max-width: 100%; }
 .card .fsize { font-size: 12px; color: var(--muted); margin-bottom: 3px; }
 .card .author { font-size: 12.5px; color: var(--muted); margin-bottom: 9px; }
 .tags { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
@@ -303,10 +303,14 @@ window.onSearchInput = function(v) {
 };
 
 async function doSearch() {
-  state.loading = true; render();
-  const r = await api(`/api/search?q=${encodeURIComponent(state.q)}&ext=${state.ext}`);
+  const q = state.q;
+  state.loading = true;
+  if (document.getElementById('results')) updateSearchResults(); else render();
+  const r = await api(`/api/search?q=${encodeURIComponent(q)}&ext=${state.ext}`);
+  if (q !== state.q) return;
   state.items = r.items || []; state.hasMore = r.hasMore; state.counts = r.counts || null;
-  state.loading = false; render();
+  state.loading = false;
+  if (document.getElementById('results')) updateSearchResults(); else render();
 }
 async function loadLatest() {
   const r = await api('/api/latest');
@@ -332,7 +336,7 @@ function renderHistory() {
 
 function headerHtml(title, sub) {
   return `<div class="hero"><div class="top"><span>مكتبة الكتب</span><span>···</span></div>
-    <h1>${esc(title)}</h1><div class="sub">${esc(sub)}</div></div>`;
+    <h1>${esc(title)}</h1><div class="sub" id="hsub">${esc(sub)}</div></div>`;
 }
 
 function navHtml() {
@@ -357,6 +361,33 @@ function chipsHtml() {
   }).join('') + `</div>`;
 }
 
+function resultsHtml() {
+  if (state.loading) return `<div class="spin">جارٍ البحث...</div>`;
+  if (!state.items.length) return `<div class="empty"><span class="big">📚</span>${state.q ? 'لا توجد نتائج مطابقة.<br>جرّب اسمًا أقصر أو جزءًا منه.' : 'المكتبة قيد الفهرسة.<br>ستظهر الكتب هنا فور إضافتها.'}</div>`;
+  const head = state.q ? `<div class="sec-head"><h2>نتائج البحث</h2></div>`
+    : (state.tab === 'search' ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '');
+  let h = head + `<div class="list">${state.items.map(cardHtml).join('')}</div>`;
+  if (state.hasMore) h += `<div class="empty">عرض المزيد من النتائج ↓</div>`;
+  return h;
+}
+
+function subText() {
+  return state.tab === 'favs' ? 'كتبك المحفوظة'
+    : (state.q && state.counts ? `وجدنا ${state.counts.all} نتيجة مطابقة لبحثك` : `أكثر من ${state.stats.files.toLocaleString('ar-EG')} ملف جاهز للتحميل`);
+}
+
+function updateSearchResults() {
+  const res = document.getElementById('results');
+  if (!res) { render(); return; }
+  res.innerHTML = resultsHtml();
+  const chips = document.getElementById('chips');
+  if (chips) chips.innerHTML = chipsHtml();
+  const sub = document.getElementById('hsub');
+  if (sub) sub.textContent = subText();
+  const ttl = document.querySelector('.hero h1');
+  if (ttl) ttl.textContent = state.q ? 'نتائج البحث' : 'ماذا تريد أن تقرأ اليوم؟';
+}
+
 function render() {
   if (state.isAdminView) return;
   const app = document.getElementById('app');
@@ -371,24 +402,14 @@ function render() {
   if (state.tab === 'search') {
     body += `<div class="searchbar">
       <button class="go" onclick="doSearch()">←</button>
-      <input placeholder="ابحث باسم الكتاب أو المؤلف..." value="${esc(state.q)}" oninput="onSearchInput(this.value)">
-    </div>` + chipsHtml();
+      <input id="q" placeholder="ابحث باسم الكتاب أو المؤلف..." value="${esc(state.q)}" oninput="onSearchInput(this.value)">
+    </div><div id="chips">` + chipsHtml() + `</div>`;
   }
-  if (state.loading) {
-    body += `<div class="spin">جارٍ البحث...</div>`;
-  } else if (!state.items.length) {
-    body += `<div class="empty"><span class="big">📚</span>${state.q ? 'لا توجد نتائج مطابقة.<br>جرّب اسمًا أقصر أو جزءًا منه.' : 'المكتبة قيد الفهرسة.<br>ستظهر الكتب هنا فور إضافتها.'}</div>`;
-  } else {
-    const head = state.q ? `<div class="sec-head"><h2>نتائج البحث</h2></div>`
-      : (state.tab === 'search' ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '');
-    body += head + `<div class="list">${state.items.map(cardHtml).join('')}</div>`;
-    if (state.hasMore) body += `<div class="empty">عرض المزيد من النتائج ↓</div>`;
-  }
+  body += `<div id="results">` + resultsHtml() + `</div>`;
   if (state.tab === 'search' && !state.q) {
     body += `<div class="stats">
       <div><b>24/7</b><span>متاح دائمًا</span></div>
-      <div><b>${state.stats.channels}</b><span>قناة مصدر</span></div>
-      <div><b>+${state.stats.files.toLocaleString('ar-EG')}</b><span>ملف</span></div>
+      <div><b>+${state.stats.files.toLocaleString('ar-EG')}</b><span>ملف جاهز للتحميل</span></div>
     </div>`;
   }
   app.innerHTML = headerHtml(title, sub) + body + navHtml();
