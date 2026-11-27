@@ -319,12 +319,14 @@ async function suggestTitles(env, q, limit = 3) {
   ).all();
   const qwords = [...new Set(nq.split(/\s+/).filter(x => x.length >= 2))].slice(0, 6);
   if (!qwords.length) return [];
+  // prefilter on the longest (rarest) query word only, then cap scored candidates
+  const mainW = qwords.slice().sort((a, b) => b.length - a.length)[0];
   const scored = [];
   for (const r of rows.results || []) {
+    if (scored.length > 0 && scored.length >= 400) break;
     const hay = (r.title_norm || '') + ' ' + norm(r.file_name || '');
     const ctoks = hay.split(/[\s_\-–—.,()]+/).filter(t => t.length >= 2);
-    // cheap prefilter: share a token or a 4-char prefix before paying for edit distance
-    const hit = qwords.some(wd => ctoks.some(t => t.includes(wd) || wd.includes(t) || (wd.length >= 4 && t.length >= 4 && t.slice(0, 4) === wd.slice(0, 4))));
+    const hit = ctoks.some(t => t.includes(mainW) || mainW.includes(t) || (mainW.length >= 4 && t.length >= 4 && t.slice(0, 4) === mainW.slice(0, 4)));
     if (!hit) continue;
     const sc = Math.min(tokenScore(nq, r.title_norm || r.title), tokenScore(nq, norm(r.file_name || '')));
     if (sc <= 1.0) scored.push({ id: r.id, title: r.title, sc });
