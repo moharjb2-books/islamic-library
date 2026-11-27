@@ -5,7 +5,7 @@
 // ADMIN_SETUP_CODE. Vars: MINIAPP_URL, BOT_USERNAME, MAIN_CHANNEL.
 // Bump on every Mini App change: Telegram's WebView caches pages per URL,
 // so the web_app links carry ?v= to force a fresh load after each deploy.
-const APP_VERSION = '20261127a';
+const APP_VERSION = '20261127b';
 function miniUrl(env, extra) {
   return env.MINIAPP_URL + '?v=' + APP_VERSION + (extra ? '&' + extra : '');
 }

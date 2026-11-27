@@ -432,8 +432,9 @@ function extLinksHtml(q) {
 }
 window.openExtLib = function(u) { if (tg && tg.openLink) tg.openLink(u); else window.open(u, '_blank'); };
 
-// External books render as the same card shape as channel books.
-const EXT_SRC_LABEL = { aj: 'الجامع · aljam3.com', ia: 'archive.org', kb: 'كتاب أونلاين · ketabonline.com' };
+// External books render as the same card shape as channel books,
+// with just the site name where channel books show @channel.
+const EXT_SRC_LABEL = { aj: '@aljam3.com', ia: '@archive.org', kb: '@ketabonline.com' };
 function extCardHtml(e2) {
   const size = e2.sizeMb ? e2.sizeMb + ' MB' : '';
   const url = String(e2.url).replace(/'/g, '%27');
@@ -451,20 +452,8 @@ function extCardHtml(e2) {
     <div class="letter" style="background:${colorFor(e2.title)}">${esc(letterFor(e2.title))}</div>
   </div>`;
 }
-function extSectionsHtml() {
-  const ext = state.external || [];
-  if (!ext.length) return '';
-  let h = '';
-  if (ext.some(e2 => e2.src === 'aj'))
-    h += `<div class="sec-head"><h2>📘 من الجامع aljam3.com</h2></div><div class="list">`
-      + ext.filter(e2 => e2.src === 'aj').map(extCardHtml).join('') + `</div>`;
-  if (ext.some(e2 => e2.src === 'ia'))
-    h += `<div class="sec-head"><h2>🌐 من archive.org</h2></div><div class="list">`
-      + ext.filter(e2 => e2.src === 'ia').map(extCardHtml).join('') + `</div>`;
-  if (ext.some(e2 => e2.src === 'kb'))
-    h += `<div class="sec-head"><h2>📗 من كتاب أونلاين</h2></div><div class="list">`
-      + ext.filter(e2 => e2.src === 'kb').map(extCardHtml).join('') + `</div>`;
-  return h;
+function extCardsHtml() {
+  return (state.external || []).map(extCardHtml).join('');
 }
 
 function resultsHtml() {
@@ -478,14 +467,18 @@ function resultsHtml() {
         ${state.suggestions.map((g, i) => `<button onclick="pickSug(${i})">🔎 ${g.title.replace(/</g, '&lt;')}</button>`).join('')}
         </div>`
       : '<br>جرّب اسمًا أقصر أو جزءًا منه.';
-    return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.` + sugHtml + extSectionsHtml() + extLinksHtml(state.q) + `</div>`;
+    const extList = extCardsHtml();
+    return `<div class="empty"><span class="big">📚</span>لا توجد نتائج مطابقة.` + sugHtml
+      + (extList ? `<div class="list" style="margin-top:10px">${extList}</div>` : '')
+      + extLinksHtml(state.q) + `</div>`;
   }
   const head = state.q ? `<div class="sec-head"><h2>نتائج البحث</h2></div>`
     : (state.tab === 'search' ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '');
-  let h = head + `<div class="list">${state.items.map(cardHtml).join('')}</div>`;
+  // External books merge into the same list right after the channel books:
+  // no section headers, and the "load more" button stays below everything.
+  const extList = state.q ? extCardsHtml() : '';
+  let h = head + `<div class="list">${state.items.map(cardHtml).join('')}${extList}</div>`;
   if (state.hasMore) h += `<button class="more-btn" id="moreBtn" onclick="loadMore()">${state.loadingMore ? 'جارٍ التحميل...' : 'عرض المزيد ⬇ (' + (state.items.length) + ' معروضة)'}</button>`;
-  // External libraries shown inline under the channel results.
-  if (state.q) h += extSectionsHtml();
   return h;
 }
 
@@ -530,7 +523,7 @@ function render() {
     body += `<div class="stats">
       <div><b>24/7</b><span>متاح دائمًا</span></div>
       <div><b>+${state.stats.files.toLocaleString('ar-EG')}</b><span>ملف جاهز للتحميل</span></div>
-    </div><div class="hint" style="text-align:center;opacity:.5;margin-top:6px">v20261127a</div>`;
+    </div><div class="hint" style="text-align:center;opacity:.5;margin-top:6px">v20261127b</div>`;
   }
   app.innerHTML = headerHtml(title, sub) + body + navHtml();
 }
@@ -541,7 +534,7 @@ function renderSettings() {
     <div class="panel"><h2>حول المكتبة</h2>
       <div class="hint">المكتبة الإسلامية الشاملة — ابحث باسم الكتاب أو المؤلف ويصلك الملف فورًا.
       يمكنك أيضًا إعادة توجيه أي ملف إلى البوت ليُضاف إلى المكتبة.</div>
-      <div class="hint" style="margin-top:8px;opacity:.6">الإصدار v20261127a</div>
+      <div class="hint" style="margin-top:8px;opacity:.6">الإصدار v20261127b</div>
     </div>
     <div class="panel"><h2>اختصارات</h2>
       <div class="ch-row"><span>📢 القناة الرئيسية</span><button class="btn" onclick="openChannel()">فتح</button></div>
