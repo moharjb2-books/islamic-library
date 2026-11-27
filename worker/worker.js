@@ -25,6 +25,17 @@ const SCHEMA = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_files_title ON files(title_norm)`,
   `CREATE INDEX IF NOT EXISTS idx_files_created ON files(created_at DESC)`,
+  `CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(title_norm, author_norm, content='')`,
+  `CREATE TRIGGER IF NOT EXISTS files_fts_ai AFTER INSERT ON files BEGIN
+     INSERT INTO files_fts(rowid, title_norm, author_norm) VALUES (new.id, new.title_norm, new.author_norm);
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS files_fts_ad AFTER DELETE ON files BEGIN
+     INSERT INTO files_fts(files_fts, rowid, title_norm, author_norm) VALUES('delete', old.id, old.title_norm, old.author_norm);
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS files_fts_au AFTER UPDATE OF title_norm, author_norm ON files BEGIN
+     INSERT INTO files_fts(files_fts, rowid, title_norm, author_norm) VALUES('delete', old.id, old.title_norm, old.author_norm);
+     INSERT INTO files_fts(rowid, title_norm, author_norm) VALUES (new.id, new.title_norm, new.author_norm);
+   END`,
   `CREATE TABLE IF NOT EXISTS channels (
     username TEXT PRIMARY KEY,
     bot_member INTEGER DEFAULT 0,
@@ -114,7 +125,21 @@ async function migrate(env) {
   try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS export_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, channel TEXT NOT NULL, status TEXT DEFAULT 'pending', note TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), done_at TEXT DEFAULT '')").run(); } catch (e) {}
   migrated = true;
   try { await reindexNormV2(env); } catch (e) { migrated = false; }
+  try { await backfillFts(env); } catch (e) {}
 }
+
+let ftsOk = false;
+async function backfillFts(env) {
+  if (ftsOk) return;
+  const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'fts_ready'").first();
+  if (row && row.value === '1') { ftsOk = true; return; }
+  await env.DB.prepare(
+    'INSERT INTO files_fts(rowid, title_norm, author_norm) SELECT id, title_norm, author_norm FROM files'
+  ).run();
+  await env.DB.prepare("INSERT OR REPLACE INTO settings(key, value) VALUES('fts_ready', '1')").run();
+  ftsOk = true;
+}
+function ftsQuery(words) { return words.map(w => '"' + w.replace(/"/g, '') + '"').join(' AND '); }
 
 // ---------- Arabic normalization ----------
 function norm(s) {
@@ -229,25 +254,34 @@ function isAudioExt(e) { return AUDIO_EXT_LIST.includes(String(e || '').toLowerC
 
 async function searchFiles(env, q, ext, offset, limit, includeAudio) {
   const nq = norm(q);
+  const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
+  let from = 'files f';
   let where = '1=1';
   const binds = [];
-  // D1 limits LIKE patterns to 50 bytes; Arabic chars are 2 bytes, so match
-  // word-by-word (each clamped) instead of one long phrase pattern.
-  const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
-  for (const w of words) {
-    where += ' AND (title_norm LIKE ? OR author_norm LIKE ?)';
-    binds.push(`%${w}%`, `%${w}%`);
+  if (words.length && ftsOk) {
+    // FTS5 reads only matching rows; LIKE would scan the whole table per search
+    // (D1 free tier caps daily rows read, so full scans do not scale).
+    from += ' JOIN files_fts x ON x.rowid = f.id';
+    where += ' AND files_fts MATCH ?';
+    binds.push(ftsQuery(words));
+  } else {
+    // D1 limits LIKE patterns to 50 bytes; Arabic chars are 2 bytes, so match
+    // word-by-word (each clamped) instead of one long phrase pattern.
+    for (const w of words) {
+      where += ' AND (f.title_norm LIKE ? OR f.author_norm LIKE ?)';
+      binds.push(`%${w}%`, `%${w}%`);
+    }
   }
   if (ext && ext !== 'all') {
-    if (ext === 'audio') { where += ` AND ext IN ${AUDIO_EXTS}`; }
-    else { where += ' AND ext = ?'; binds.push(ext.toLowerCase()); }
+    if (ext === 'audio') { where += ` AND f.ext IN ${AUDIO_EXTS}`; }
+    else { where += ' AND f.ext = ?'; binds.push(ext.toLowerCase()); }
   } else if (!includeAudio) {
-    where += ` AND ext NOT IN ${AUDIO_EXTS}`;
+    where += ` AND f.ext NOT IN ${AUDIO_EXTS}`;
   }
   binds.push(limit + 1, offset);
   const rows = await env.DB.prepare(
-    `SELECT * FROM files WHERE ${where}
-     ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    `SELECT f.* FROM ${from} WHERE ${where}
+     ORDER BY f.created_at DESC, f.id DESC LIMIT ? OFFSET ?`
   ).bind(...binds).all();
   const items = rows.results || [];
   const hasMore = items.length > limit;
@@ -256,13 +290,20 @@ async function searchFiles(env, q, ext, offset, limit, includeAudio) {
 
 async function countExt(env, q) {
   const nq = norm(q);
+  const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
+  let from = 'files f';
   let where = '1=1';
   const binds = [];
-  const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
-  for (const w of words) { where += ' AND (title_norm LIKE ? OR author_norm LIKE ?)'; binds.push(`%${w}%`, `%${w}%`); }
+  if (words.length && ftsOk) {
+    from += ' JOIN files_fts x ON x.rowid = f.id';
+    where += ' AND files_fts MATCH ?';
+    binds.push(ftsQuery(words));
+  } else {
+    for (const w of words) { where += ' AND (f.title_norm LIKE ? OR f.author_norm LIKE ?)'; binds.push(`%${w}%`, `%${w}%`); }
+  }
   const rows = await env.DB.prepare(
-    `SELECT CASE WHEN ext IN ${AUDIO_EXTS} THEN 'audio' ELSE ext END AS k, COUNT(*) AS c
-     FROM files WHERE ${where} GROUP BY k`
+    `SELECT CASE WHEN f.ext IN ${AUDIO_EXTS} THEN 'audio' ELSE f.ext END AS k, COUNT(*) AS c
+     FROM ${from} WHERE ${where} GROUP BY k`
   ).bind(...binds).all();
   const out = {};
   let total = 0;
@@ -323,11 +364,20 @@ async function suggestTitles(env, q, limit = 3) {
   // SQL-side candidate pull: D1 scans, the worker only scores a bounded set.
   const mainW = qwords.slice().sort((a, b) => b.length - a.length)[0].slice(0, 20);
   const prefix = mainW.slice(0, 4);
-  const rows = await env.DB.prepare(
-    `SELECT id, title, title_norm, file_name FROM files
-     WHERE title_norm LIKE ? OR title_norm LIKE ?
-     ORDER BY id DESC LIMIT 150`
-  ).bind(`%${mainW}%`, `%${prefix}%`).all();
+  let rows;
+  if (ftsOk) {
+    rows = await env.DB.prepare(
+      `SELECT f.id, f.title, f.title_norm, f.file_name FROM files f
+       JOIN files_fts x ON x.rowid = f.id
+       WHERE files_fts MATCH ? ORDER BY f.id DESC LIMIT 150`
+    ).bind('"' + mainW.replace(/"/g, '') + '" OR "' + prefix.replace(/"/g, '') + '"*').all();
+  } else {
+    rows = await env.DB.prepare(
+      `SELECT id, title, title_norm, file_name FROM files
+       WHERE title_norm LIKE ? OR title_norm LIKE ?
+       ORDER BY id DESC LIMIT 150`
+    ).bind(`%${mainW}%`, `%${prefix}%`).all();
+  }
   // score in JS with tokens normed once per candidate, and a global editDist budget
   let distBudget = 2500;
   const scored = [];
@@ -1253,9 +1303,8 @@ async function handleIngest(env, request) {
       'UPDATE channels SET last_message_id = MAX(last_message_id, ?) WHERE username = ?'
     ).bind(Number(body.last_message_id), channel).run();
   }
-  if (channel) {
-    const c = await env.DB.prepare('SELECT COUNT(*) AS c FROM files WHERE channel = ?').bind(channel).first();
-    await env.DB.prepare('UPDATE channels SET file_count = ? WHERE username = ?').bind(c.c || 0, channel).run();
+  if (channel && added > 0) {
+    await env.DB.prepare('UPDATE channels SET file_count = file_count + ? WHERE username = ?').bind(added, channel).run();
   }
   return json({ ok: true, added }, 200, false);
 }
