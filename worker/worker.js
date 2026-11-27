@@ -510,7 +510,7 @@ async function iaSearch(env, q, limit = 3) {
 const NON_SUNNI_RE = /(الشيع|الإمامية|الزيدية|الخميني|الكليني|المجلسي|الطوسي|الطباطبائي|زيد بن علي|الحر العاملي|الإسماعيلي|البهائية|القاديانية|الأحمدية|النصيرية|الدرزية|بابي)/;
 function sunniOk(...fields) { return !NON_SUNNI_RE.test(fields.filter(Boolean).join(' ')); }
 // IA bulk packs (whole-library zips) are noise for a single-book query.
-const IA_BULK_RE = /(6538|صيغة (ورد|ويب)|كتاب إسلامي كل ألف|6 ألف|HTM WEB|shamelah library|موسوعة الكتب)/i;
+const IA_BULK_RE = /(6538|صيغة و+رد|صيغة ويب|صيغة htm|كتاب إسلامي كل ألف|6 ألف|HTM WEB|shamelah|موسوعة الكتب|الموسوعة المقروءة)/i;
 
 // aljam3.com (الجامع): free open API, ~63k Sunni-curated books. Search has no
 // files; a bounded detail call per hit resolves direct PDF/DOCX/TXT links.
@@ -556,10 +556,12 @@ async function ajSearch(env, q, limit = 3) {
       if (!pdf && !alt) return null;
       return { title, url: pdf || alt, alt: pdf ? alt : null, altKind, lib: strip(b.library && b.library.name) };
     }));
-    // Dedupe editions: same direct file or same label keeps only its first hit.
+    // Dedupe editions: same direct file, or same author + same normalized title
+    // (punctuation/edition markers ignored), keeps only its first hit.
     const seen = new Set();
     const out = items.filter(Boolean).filter(i => {
-      const k1 = 'u:' + i.url, k2 = 't:' + i.title;
+      const k1 = 'u:' + i.url;
+      const k2 = 't:' + i.title.replace(/[\s\-–—:()«»]+/g, '').slice(0, 22);
       if (seen.has(k1) || seen.has(k2)) return false;
       seen.add(k1); seen.add(k2);
       return true;
