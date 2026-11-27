@@ -494,7 +494,7 @@ async function iaSearch(env, q, limit = 3) {
           if (!pick) return page;
           const mb = pick.size ? Math.round(Number(pick.size) / 1e6) : 0;
           return {
-            title: title.slice(0, 30) + (mb ? ` · ${mb}MB` : ''),
+            title: title.slice(0, 36) + (mb ? ` · ${mb}MB` : ''),
             url: `${base}/download/${encodeURIComponent(d.identifier)}/${encodeURIComponent(pick.name)}`,
           };
         } finally { clearTimeout(t2); }
@@ -561,7 +561,7 @@ async function ajSearch(env, q, limit = 3) {
     const seen = new Set();
     const out = items.filter(Boolean).filter(i => {
       const k1 = 'u:' + i.url;
-      const k2 = 't:' + i.title.replace(/[\s\-–—:()«»]+/g, '').slice(0, 22);
+      const k2 = 't:' + i.title.replace(/[\s\-–—:()«»]+/g, '').replace(/[أإآ]/g, 'ا').slice(0, 22);
       if (seen.has(k1) || seen.has(k2)) return false;
       seen.add(k1); seen.add(k2);
       return true;
