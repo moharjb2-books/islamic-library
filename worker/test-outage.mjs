@@ -45,11 +45,13 @@ const iaServer = http.createServer((req, res) => {
   if (u.pathname.startsWith('/metadata/')) {
     const id = decodeURIComponent(u.pathname.slice('/metadata/'.length));
     if (id === 'tafsir-ibn-kathir-01') return res.end(JSON.stringify({ files: [{ name: 'tafsir_text.pdf', size: '12000000' }] }));
+    if (id === 'dirasa-01') return res.end(JSON.stringify({ files: [{ name: 'dirasa.pdf', size: '5000000' }] }));
     return res.end(JSON.stringify({ files: [] }));
   }
   const q = u.searchParams.get('q') || '';
   const docs = [];
   if (q.includes('مقدمة')) docs.push({ identifier: 'tafsir-ibn-kathir-01', title: 'مقدمة ابن خلدون ط العلمية', creator: 'ابن خلدون' });
+  if (q.includes('دراسات')) docs.push({ identifier: 'dirasa-01', title: 'دراسات عن مقدمة ابن خلدون', creator: 'ابن خلدون' });
   if (q.includes('فقه')) docs.push({ identifier: 'tafsir-ibn-kathir-01', title: 'فقه السنة', creator: 'سيد سابق' });
   // Noise every query gets: bulk pack, non-Sunni, and an irrelevant hit.
   docs.push(
@@ -66,6 +68,10 @@ const kbServer = http.createServer((req, res) => {
   res.setHeader('content-type', 'application/json');
   const q = new URL(req.url, 'http://x').searchParams.get('q') || '';
   const data = [];
+  if (q.includes('دراسات')) data.push(
+    { id: 2500, lang: 'ar', is_free: 1, title: 'دراسات <em>مقدمة</em> خلدون', authors: [{ name: 'ابن خلدون' }],
+      files: { data: { url: 'https://s2.ketabonline.com/books/2500/2500.data.zip', size: 636914 },
+               pdf: { url: 'https://s2.ketabonline.com/books/2500/2500.pdf.zip', size: 4965008 } } });
   if (q.includes('مقدمة') || q.includes('فقه')) data.push(
     { id: 2422, lang: 'ar', is_free: 1, title: q.includes('مقدمة') ? 'مقدمة <em>ابن</em> خلدون' : 'فقه <em>المعاملات</em>', authors: [{ name: 'ابن خلدون' }],
       files: { data: { url: 'https://s2.ketabonline.com/books/2422/2422.data.zip', size: 636914 },
@@ -92,6 +98,9 @@ const ajServer = http.createServer((req, res) => {
     if (q.includes('مقدمة')) books.push(
       { id: 101, title: '<mark>مقدمة&nbsp;</mark>ابن خلدون', author: { id: 1, name: 'ابن خلدون' }, library: { id: 3, name: 'الوقفية' } },
       { id: 103, title: 'مقدمة ابن خلدون - طبعة أخرى', author: { id: 1, name: 'ابن خلدون' }, library: { id: 3, name: 'الوقفية' } });
+    if (q.includes('دراسات')) books.push(
+      { id: 106, title: 'دراسات عن <mark>مقدمة</mark> ابن خلدون', author: { id: 1, name: 'ابن خلدون' }, library: { id: 3, name: 'الوقفية' } },
+      { id: 107, title: 'دراسات مقدمة خلدون - طبعة أخرى', author: { id: 1, name: 'ابن خلدون' }, library: { id: 3, name: 'الوقفية' } });
     if (q.includes('فقه')) books.push(
       { id: 101, title: 'فقه المعاملات', author: { id: 2, name: 'ابن قدامة' }, library: { id: 3, name: 'الوقفية' } });
     // Noise: an irrelevant hit and a non-Sunni one.
@@ -99,6 +108,9 @@ const ajServer = http.createServer((req, res) => {
       { id: 105, title: 'رياض الصالحين - النووي', author: { id: 1, name: 'النووي' }, library: { id: 3, name: 'الوقفية' } },
       { id: 104, title: 'الكافي', author: { id: 9, name: 'الكليني' }, library: { id: 3, name: 'الوقفية' } });
     return res.end(JSON.stringify({ books }));
+  }
+  if (u.pathname === '/api/v1/books/106' || u.pathname === '/api/v1/books/107') {
+    return res.end(JSON.stringify({ files: [{ id: 6, urls: { pdf: 'https://hf.co/dirasa.pdf' } }] }));
   }
   if (u.pathname === '/api/v1/books/105') {
     return res.end(JSON.stringify({ files: [{ id: 5, urls: { pdf: 'https://hf.co/riyad105.pdf' } }] }));
@@ -172,14 +184,26 @@ check('bot search returns snapshot results with D1 dead', Boolean(resMsg && JSON
 {
   const mk = JSON.stringify((resMsg && resMsg.body.reply_markup) || {});
   const tx = (resMsg && resMsg.body.text) || '';
-  check('has-results shows external sources inline (aljam3 + archive.org + ketabonline)', mk.includes('hf.co/riyad.pdf') && mk.includes('hf.co/riyad.docx') && mk.includes('/download/tafsir-ibn-kathir-01/tafsir_text.pdf') && mk.includes('ketabonline.com/ar/books/2422') && mk.includes('2422.pdf.zip'), mk.slice(0, 400));
+  check('paged first page hides external sites (عرض المزيد only)', mk.includes('more:') && !mk.includes('hf.co') && !mk.includes('ketabonline.com') && !mk.includes('archive.org') && !mk.includes('/download/tafsir-ibn-kathir-01/'), mk.slice(0, 400));
   check('irrelevant + non-Sunni + bulk external hits are dropped', !mk.includes('رياض الصالحين') && !mk.includes('riyad105') && !mk.includes('الكافي') && !mk.includes('الكليني') && !mk.includes('kafi.pdf') && !mk.includes('bulk-pack-99') && !mk.includes('بحار') && !mk.includes('كتاب آخر') && !mk.includes('العمل الصالح') && !mk.includes('7777') && !mk.includes('9999') && !mk.includes('8888'), mk.slice(0, 500));
-  check('aljam3 duplicate editions collapse (riyad.pdf appears once)', mk.split('hf.co/riyad.pdf').length === 2, mk.slice(0, 300));
+
   check('external titles are tag-stripped', !mk.includes('<mark>') && !mk.includes('<em>'), mk.slice(0, 200));
   const lbls = [...mk.matchAll(/"text":"([^"]+)"/g)].map(x => x[1]);
   check('has-results labels are clean (no underscores / raw extensions)', lbls.length > 0 && lbls.every(l => !/\.(pdf|epub|docx)/i.test(l) && !/\w_\w/.test(l)), JSON.stringify(lbls).slice(0, 300));
   check('has-results reply is cards only (no header text at all)', tx === '📚', tx.slice(0, 200));
   check('external rows look like channel rows (uniform 📕 labels)', lbls.filter(l => l.startsWith('📕')).length >= 4, JSON.stringify(lbls).slice(0, 300));
+}
+// 2b. single-page search (few local matches, no عرض المزيد) -> external sites
+// appear right on that only page (they belong at the END of results)
+{
+  tgCalls.length = 0;
+  await fire({ update_id: 22, message: { message_id: 22, chat: { id: 12345, type: 'private' }, from: { id: 12345, first_name: 'T' }, text: 'دراسات مقدمة خلدون' } });
+  await new Promise(r => setTimeout(r, 400));
+  const m3 = tgCalls.find(c => c.method === 'sendMessage' && c.body.reply_markup);
+  const mk3 = m3 ? JSON.stringify(m3.body.reply_markup) : '';
+  check('single-page results end with external sites (aljam3 + archive.org + ketabonline)', mk3.length > 60 && !mk3.includes('more:') && mk3.includes('hf.co/dirasa.pdf') && mk3.includes('/download/dirasa-01/dirasa.pdf') && mk3.includes('ketabonline.com/ar/books/2500'), mk3.slice(0, 500));
+  check('aljam3 duplicate editions collapse (dirasa.pdf appears once)', mk3.split('hf.co/dirasa.pdf').length === 2, mk3.slice(0, 400));
+  check('external titles are tag-stripped on the final page', !mk3.includes('<mark>') && !mk3.includes('<em>') && !mk3.includes('&nbsp;'), mk3.slice(0, 300));
 }
 // local duplicate rows collapse to one (largest copy kept)
 {
@@ -192,6 +216,19 @@ check('bot search returns snapshot results with D1 dead', Boolean(resMsg && JSON
   const labels = [...rows.matchAll(/"text":"📕 ([^"]+)"/g)].map(x => x[1]);
   const uniq = new Set(labels.map(l => l.replace(/\s*\((PDF|EPUB|DOCX|صوتي)[^)]*\)$/i, '').trim().toLowerCase()));
   check('local duplicate titles collapse to one row', dlIds.length > 0 && uniq.size === labels.length, `${labels.length} rows, ${uniq.size} unique`);
+}
+
+// 2c. multi-volume books come out 1, 2, 3 ... ascending (not newest-first)
+{
+  tgCalls.length = 0;
+  await fire({ update_id: 23, message: { message_id: 23, chat: { id: 12345, type: 'private' }, from: { id: 12345, first_name: 'T' }, text: 'تفسير ابن كثير' } });
+  await new Promise(r => setTimeout(r, 400));
+  const m4 = tgCalls.find(c => c.method === 'sendMessage' && c.body.reply_markup);
+  const mk4 = m4 ? JSON.stringify(m4.body.reply_markup) : '';
+  const i1 = mk4.indexOf('تفسير ابن كثير - 1 (');
+  const i2 = mk4.indexOf('تفسير ابن كثير - 2 (');
+  const i3 = mk4.indexOf('تفسير ابن كثير - 3 (');
+  check('multi-volume order is ascending (1 before 2 before 3)', i1 >= 0 && i2 > i1 && i3 > i2, JSON.stringify([...mk4.matchAll(/"text":"📕 ([^"]+)"/g)].map(x=>x[1])));
 }
 
 // 3. delivery callback dl:<id> while D1 is dead -> file sent via snapshot lookup

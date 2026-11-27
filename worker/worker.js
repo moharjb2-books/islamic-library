@@ -359,26 +359,56 @@ async function snapSearch(q, ext, offset, limit, includeAudio) {
       }
     }
   } catch (e) {}
-  const items = [];
+  // Collect the whole match set (bounded), then volume-sort BEFORE paging so
+  // multi-volume books come out 1, 2, 3 ... ascending across pages.
+  const MATCH_CAP = 500;
+  const matchedRows = [];
   const chunks = {};
-  let pos = ordered ? 0 : cand.length - 1, matched = 0, scanned = 0;
+  let pos = ordered ? 0 : cand.length - 1, scanned = 0, truncated = false;
   const step = ordered ? 1 : -1;
   const last = ordered ? ordered.length : -1;
-  while (pos !== last && items.length < limit + 1 && scanned < 6000) {
+  while (pos !== last && matchedRows.length < MATCH_CAP && scanned < 6000) {
     const g = ordered ? ordered[pos] : cand[pos]; pos += step; scanned++;
     const ci = Math.floor(g / 500);
     if (!chunks[ci]) {
-      if (Object.keys(chunks).length >= 8) break;
+      if (Object.keys(chunks).length >= 8) { truncated = true; break; }
       chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json');
     }
     const r = chunks[ci][g % 500];
     if (!r) continue;
     if (!extFilterOk(r[4], ext, includeAudio)) continue;
-    if (matched++ < offset) continue;
-    items.push(snapRowFile(r));
+    matchedRows.push(snapRowFile(r));
   }
-  const hasMore = items.length > limit;
-  return { items: items.slice(0, limit), hasMore };
+  if (pos !== last && (scanned >= 6000 || matchedRows.length >= MATCH_CAP)) truncated = true;
+  const sortedAll = volSort(matchedRows);
+  const hasMore = sortedAll.length > offset + limit || truncated;
+  return { items: sortedAll.slice(offset, offset + limit), hasMore };
+}
+// Volume-aware ordering: parts of one book (same title stem, differing only in
+// a number) appear 1, 2, 3 ... ascending; everything else keeps stream order.
+const AR_DIGIT = { '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9' };
+function volInfo(title) {
+  const t = String(title || '').replace(/[٠-٩]/g, d => AR_DIGIT[d]);
+  const m = t.match(/\d{1,4}/);
+  const vol = m ? parseInt(m[0], 10) : null;
+  const stem = norm(t.replace(/\d{1,4}/g, ' ')
+    .replace(/(^|\s)(ج|جزء|مجلد|المجلد|ط)(?=\s|$)/g, ' '))
+    .replace(/\s+/g, ' ').trim();
+  return { stem, vol };
+}
+function volSort(items) {
+  const firstIdx = new Map();
+  const meta = items.map((f, i) => {
+    const v = volInfo(cleanTitle(f.file_name || f.title));
+    const key = v.stem || String(f.id);
+    if (!firstIdx.has(key)) firstIdx.set(key, i);
+    return { f, key, vol: v.vol, i };
+  });
+  meta.sort((a, b) =>
+    (firstIdx.get(a.key) - firstIdx.get(b.key)) ||
+    ((a.vol === null ? Infinity : a.vol) - (b.vol === null ? Infinity : b.vol)) ||
+    (a.i - b.i));
+  return meta.map(x => x.f);
 }
 async function snapGetFileById(id) {
   const lst = await snapGet('/byid/b' + (id % 64) + '.json');
@@ -1320,15 +1350,17 @@ async function handleUpdate(env, update, ctx2) {
       if (text.length > 200) text = text.slice(0, 200);
       const perPage = parseInt(settings.per_page, 10) || 10;
       const audioAsked = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(text);
-      // Local channels and external libraries searched together, in parallel.
-      const [{ items, hasMore }, ajAll, iaAll, kbAll] = await Promise.all([
-        searchFiles(env, text, 'all', 0, perPage, audioAsked),
-        audioAsked ? [] : ajSearch(env, text, 3),
-        audioAsked ? [] : iaSearch(env, text, 3),
-        audioAsked ? [] : kbSearch(env, text, 3),
-      ]);
+      const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
       const local = polishLocal(items, env.MAIN_CHANNEL);
       defer(ctx2, logSearch(env, from.id, text, local.length));
+      // External sites come LAST: only fetched when this page is also the final
+      // page (no عرض المزيد), or when there are no local results at all.
+      const needExt = !audioAsked && (!local.length || !hasMore);
+      const [ajAll, iaAll, kbAll] = needExt ? await Promise.all([
+        ajSearch(env, text, 3),
+        iaSearch(env, text, 3),
+        kbSearch(env, text, 3),
+      ]) : [[], [], []];
       const extCap = local.length ? 2 : 3;
       const aj = (ajAll || []).slice(0, extCap);
       const ext = (iaAll || []).slice(0, extCap);
@@ -1358,7 +1390,7 @@ async function handleUpdate(env, update, ctx2) {
         return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
       if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + items.length, style: 'primary', icon_custom_emoji_id: ICON.dl }]);
-      for (const row of extRows(aj, ext, kbk)) keyboard.push(row);
+      else for (const row of extRows(aj, ext, kbk)) keyboard.push(row);
       // Telegram rejects web_app buttons in groups (BUTTON_TYPE_INVALID):
       // there the button deep-links to the bot's Mini App over plain t.me.
       keyboard.push([msg.chat.type === 'private'
@@ -1479,8 +1511,22 @@ async function handleUpdate(env, update, ctx2) {
       const perPage3 = 20;
       const audioAsked3 = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(last.q);
       const { items, hasMore } = await searchFiles(env, last.q, 'all', off, perPage3, audioAsked3);
+      // External sites appear only at the very end of paging.
+      let extLastRows = [];
+      if (!hasMore && !audioAsked3) {
+        const [ajAll3, iaAll3, kbAll3] = await Promise.all([
+          ajSearch(env, last.q, 3),
+          iaSearch(env, last.q, 3),
+          kbSearch(env, last.q, 3),
+        ]);
+        extLastRows = extRows((ajAll3 || []).slice(0, 2), (iaAll3 || []).slice(0, 2), (kbAll3 || []).slice(0, 2));
+      }
       if (!items.length) {
-        await tg(env, 'sendMessage', { chat_id: chatId, text: 'انتهت النتائج ✅' });
+        await tg(env, 'sendMessage', {
+          chat_id: chatId,
+          text: extLastRows.length ? 'انتهت نتائج المكتبة ✅\n\n🌐 ودي نتائج من المواقع الخارجية:' : 'انتهت النتائج ✅',
+          reply_markup: extLastRows.length ? { inline_keyboard: extLastRows } : undefined,
+        });
         return;
       }
       const keyboard = items.map(f => {
@@ -1489,9 +1535,11 @@ async function handleUpdate(env, update, ctx2) {
         return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
       if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + (off + items.length), style: 'primary', icon_custom_emoji_id: ICON.dl }]);
+      else for (const row of extLastRows) keyboard.push(row);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
-        text: `🔍 «${last.q}» — نتائج ${off + 1} إلى ${off + items.length}:`,
+        text: `🔍 «${last.q}» — نتائج ${off + 1} إلى ${off + items.length}:`
+          + (!hasMore && extLastRows.length ? '\n\n🌐 ودي نتائج من المواقع الخارجية:' : ''),
         reply_markup: { inline_keyboard: keyboard },
       });
       return;
