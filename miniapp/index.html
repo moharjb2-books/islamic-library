@@ -2,7 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>المكتبة الإسلامية الشاملة</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
@@ -29,6 +29,7 @@
   --line: #e8e0cd;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { overflow-x: hidden; max-width: 100vw; }
 body {
   font-family: 'Thmanyah Sans', system-ui, sans-serif;
   background: var(--cream);
@@ -61,7 +62,7 @@ h1, h2, h3, .serif { font-family: 'Thmanyah Serif', serif; }
 }
 .searchbar input {
   flex: 1; border: 0; outline: 0; background: transparent;
-  font-family: inherit; font-size: 15.5px; padding: 12px 0; color: var(--ink);
+  font-family: inherit; font-size: 16px; padding: 12px 0; color: var(--ink);
 }
 .searchbar input::placeholder { color: var(--muted); }
 .searchbar .go {
@@ -296,11 +297,7 @@ window.setTab = function(tab) {
   else if (tab === 'dl') renderHistory();
   else render();
 };
-window.onSearchInput = function(v) {
-  state.q = v;
-  clearTimeout(window.__st);
-  window.__st = setTimeout(doSearch, 450);
-};
+window.onSearchInput = function(v) { state.q = v; };
 
 async function doSearch() {
   const q = state.q;
@@ -402,7 +399,9 @@ function render() {
   if (state.tab === 'search') {
     body += `<div class="searchbar">
       <button class="go" onclick="doSearch()">←</button>
-      <input id="q" placeholder="ابحث باسم الكتاب أو المؤلف..." value="${esc(state.q)}" oninput="onSearchInput(this.value)">
+      <input id="q" placeholder="ابحث باسم الكتاب أو المؤلف..." value="${esc(state.q)}" enterkeyhint="search"
+        oninput="state.q=this.value"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();doSearch();}">
     </div><div id="chips">` + chipsHtml() + `</div>`;
   }
   body += `<div id="results">` + resultsHtml() + `</div>`;
