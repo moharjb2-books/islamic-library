@@ -233,8 +233,27 @@ async function api(path, opts = {}) {
   } else {
     path += sep + 'init=' + encodeURIComponent(initData);
   }
-  const r = await fetch(API + path, opts);
-  return r.json();
+  try {
+    const r = await fetch(API + path, opts);
+    return await r.json();
+  } catch (e) {
+    return { error: 'network', message: 'تعذّر الاتصال بالخادم. تحقق من الإنترنت وحاول مجددًا.' };
+  }
+}
+
+function tgConfirm(msg) {
+  return new Promise(res => {
+    if (window.Telegram && Telegram.WebApp && Telegram.WebApp.showConfirm) {
+      try { return Telegram.WebApp.showConfirm(msg, ok => res(!!ok)); } catch (e) {}
+    }
+    res(window.confirm(msg));
+  });
+}
+
+function busy(btn, on, label) {
+  if (!btn) return;
+  if (on) { btn.dataset.lbl = btn.textContent; btn.disabled = true; btn.textContent = label || 'جارٍ...'; btn.style.opacity = .6; }
+  else { btn.disabled = false; btn.textContent = btn.dataset.lbl || btn.textContent; btn.style.opacity = 1; }
 }
 
 function letterFor(title) {
@@ -457,6 +476,7 @@ async function loadAdmin() {
   const app = document.getElementById('app');
   app.innerHTML = `<div class="admin-hero"><h1>لوحة التحكم</h1><div class="sub">إدارة المصادر والإعدادات · للمشرف فقط</div></div><div class="spin">جارٍ التحميل...</div>`;
   const r = await api('/api/admin/overview');
+  if (r.error) { app.innerHTML = `<div class="empty"><span class="big">⚠️</span>${esc(r.message || r.error)}</div>`; return; }
   if (r.error) { app.innerHTML = `<div class="empty"><span class="big">🔒</span>هذه المنطقة للمشرف فقط.</div>` + navHtml(); state.isAdminView = false; return; }
   state.admin = r;
   if (state.me && state.me.is_owner) {
@@ -505,6 +525,7 @@ function renderAdmin() {
   <div class="panel"><h2>المصادر المفهرسة</h2>
     ${a.channels.length ? a.channels.map(c => `<div class="ch-row">
       <button class="x" onclick="rmChannel('${esc(c.username)}')">✕</button>
+      <label class="switch"><input type="checkbox" ${c.active ? 'checked' : ''} onchange="toggleChannel('${esc(c.username)}', this.checked)"><span class="sl"></span></label>
       <span class="cnt">${(c.file_count || 0).toLocaleString('ar-EG')} ملف</span>
       <span class="who"><span class="dot ${c.active ? 'g' : 'r'}"></span>@${esc(c.username)}</span>
     </div>`).join('') : '<div class="hint">لا مصادر بعد.</div>'}
@@ -565,71 +586,89 @@ function renderAdmin() {
 window.addChannel = async function() {
   const v = document.getElementById('newCh').value.trim();
   if (!v) return toast('اكتب رابط القناة أولًا');
+  const b = event && event.target; busy(b, true, 'جارٍ الإضافة...');
   const member = document.getElementById('newChMember').checked;
   const r = await api('/api/admin/channel', { method: 'POST', data: { username: v, action: 'add', bot_member: member } });
-  if (r.error) return toast('رابط غير صالح');
+  busy(b, false);
+  if (r.error) return toast(r.message || 'رابط غير صالح');
   toast('أضيف المصدر وستبدأ فهرسته'); loadAdmin();
 };
 window.rmChannel = async function(u) {
-  await api('/api/admin/channel', { method: 'POST', data: { username: u, action: 'remove' } });
+  if (!(await tgConfirm('حذف المصدر @' + u + ' من الفهرسة؟'))) return;
+  const r = await api('/api/admin/channel', { method: 'POST', data: { username: u, action: 'remove' } });
+  if (r.error) return toast(r.message || 'تعذّر الحذف');
   toast('حُذف المصدر'); loadAdmin();
+};
+window.toggleChannel = async function(u, on) {
+  const r = await api('/api/admin/channel-toggle', { method: 'POST', data: { username: u, active: on } });
+  if (r.error) return toast(r.message || 'تعذّر التحديث');
+  toast(on ? 'فُعّل المصدر' : 'عُطّل المصدر'); loadAdmin();
 };
 window.addForced = async function() {
   const v = document.getElementById('newForced').value.trim();
   if (!v) return toast('اكتب اسم القناة');
-  await api('/api/admin/forced', { method: 'POST', data: { username: v, action: 'add' } });
+  const b = event && event.target; busy(b, true);
+  const r = await api('/api/admin/forced', { method: 'POST', data: { username: v, action: 'add' } });
+  busy(b, false);
+  if (r.error) return toast(r.message || 'تعذّرت الإضافة');
   toast('أضيفت قناة الاشتراك الإجباري'); loadAdmin();
 };
 window.rmForced = async function(u) {
-  await api('/api/admin/forced', { method: 'POST', data: { username: u, action: 'remove' } });
-  loadAdmin();
+  const r = await api('/api/admin/forced', { method: 'POST', data: { username: u, action: 'remove' } });
+  if (r.error) return toast(r.message || 'تعذّر الحذف');
+  toast('أزيلت القناة'); loadAdmin();
 };
 window.toggleForced = async function(u, on) {
-  await api('/api/admin/forced-toggle', { method: 'POST', data: { username: u, active: on } });
+  const r = await api('/api/admin/forced-toggle', { method: 'POST', data: { username: u, active: on } });
+  if (r.error) return toast(r.message || 'تعذّر التحديث');
+  toast(on ? 'فُعّل الاشتراك' : 'عُطّل الاشتراك');
 };
 window.saveSettings = async function() {
-  await api('/api/admin/settings', { method: 'POST', data: {
+  const b = event && event.target; busy(b, true, 'جارٍ الحفظ...');
+  const r = await api('/api/admin/settings', { method: 'POST', data: {
     welcome_on: document.getElementById('sWelcome').checked ? '1' : '0',
     per_page: document.getElementById('sPerPage').value || '10',
     protect_content: document.getElementById('sProtect').checked ? '1' : '0',
     notify_new: document.getElementById('sNotify').checked ? '1' : '0',
   }});
+  busy(b, false);
+  if (r.error) return toast(r.message || 'تعذّر الحفظ');
   toast('تم حفظ التغييرات');
 };
 window.addAdmin = async function() {
   const v = document.getElementById('newAdmin').value.trim();
   if (!v) return toast('اكتب رقم الحساب أو اسم المستخدم');
+  const b = event && event.target; busy(b, true);
   const r = await api('/api/admin/admin', { method: 'POST', data: { user: v, action: 'add' } });
+  busy(b, false);
   if (r.error) return toast(r.message || 'تعذرت الإضافة');
   toast('أضيف المشرف'); loadAdmin();
 };
 window.rmAdmin = async function(uid) {
-  await api('/api/admin/admin', { method: 'POST', data: { user: String(uid), action: 'remove' } });
+  if (!(await tgConfirm('إزالة هذا المشرف؟'))) return;
+  const r = await api('/api/admin/admin', { method: 'POST', data: { user: String(uid), action: 'remove' } });
+  if (r.error) return toast(r.message || 'تعذّرت الإزالة');
   toast('أزيل المشرف'); loadAdmin();
 };
 window.bcPreview = async function() {
+  const b = event && event.target; busy(b, true);
   const r = await api('/api/admin/broadcast', { method: 'POST', data: { action: 'preview' } });
-  document.getElementById('bcInfo').textContent = r.users !== undefined ? `سيصل إلى ${r.users.toLocaleString('ar-EG')} مستخدم` : 'تعذر الجلب';
+  busy(b, false);
+  document.getElementById('bcInfo').textContent = r.users !== undefined ? `سيصل إلى ${r.users.toLocaleString('ar-EG')} مستخدم` : (r.message || 'تعذر الجلب');
 };
 window.bcSend = async function() {
   const t = document.getElementById('bcText').value.trim();
   if (!t) return toast('اكتب الرسالة أولًا');
+  const b = event && event.target; busy(b, true, 'جارٍ الإرسال...');
   const p = await api('/api/admin/broadcast', { method: 'POST', data: { action: 'preview' } });
-  if (!confirm(`إرسال إلى ${p.users || 0} مستخدم؟`)) return;
+  if (p.error) { busy(b, false); return toast(p.message || 'تعذر الإرسال'); }
+  if (!(await tgConfirm(`إرسال إلى ${p.users || 0} مستخدم؟`))) { busy(b, false); return; }
   const r = await api('/api/admin/broadcast', { method: 'POST', data: { action: 'send', text: t } });
-  if (r.error) return toast('تعذر الإرسال');
+  busy(b, false);
+  if (r.error) return toast(r.message || 'تعذر الإرسال');
   document.getElementById('bcText').value = '';
   toast('بدأ الإرسال على دفعات');
   bcLoadList();
-};
-window.bcLoadList = async function() {
-  const r = await api('/api/admin/broadcasts');
-  const el = document.getElementById('bcList');
-  if (!el) return;
-  el.innerHTML = (r.broadcasts || []).map(b => `<div class="ch-row">
-    <span class="cnt">✅${b.sent} ❌${b.failed} 🚫${b.blocked}</span>
-    <span class="who">${esc((b.text || b.kind).slice(0, 30))} · ${b.status === 'done' ? 'اكتمل' : b.status === 'pending' || b.status === 'sending' ? 'يُرسل...' : b.status}</span>
-  </div>`).join('');
 };
 window.exitAdmin = function() { state.isAdminView = false; state.tab = 'search'; render(); };
 

@@ -1176,7 +1176,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (request.method === 'OPTIONS') return json({}, 204);
+    if (request.method === 'OPTIONS') return json({ ok: true }, 200);
 
     if (path === '/health') return json({ ok: true, service: 'islamic-library' }, 200, false);
 
