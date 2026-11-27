@@ -1256,7 +1256,7 @@ export default {
       return json({ error: 'internal', detail: String((e && e.stack) || e).slice(0, 400) }, 500);
     }
   },
-});
+};
 
 async function handleFetch(request, env, ctx) {
     await migrate(env);
