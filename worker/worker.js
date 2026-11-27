@@ -3,6 +3,12 @@
 // Cloudflare Worker: webhook + Mini App API + crawler ingest, D1 storage.
 // Bindings: DB (D1). Secrets: BOT_TOKEN, INGEST_SECRET, WEBHOOK_SECRET,
 // ADMIN_SETUP_CODE. Vars: MINIAPP_URL, BOT_USERNAME, MAIN_CHANNEL.
+// Bump on every Mini App change: Telegram's WebView caches pages per URL,
+// so the web_app links carry ?v= to force a fresh load after each deploy.
+const APP_VERSION = '20261127a';
+function miniUrl(env, extra) {
+  return env.MINIAPP_URL + '?v=' + APP_VERSION + (extra ? '&' + extra : '');
+}
 // ============================================================================
 
 const SCHEMA = [
@@ -1150,7 +1156,7 @@ async function handleUpdate(env, update, ctx2) {
         await tg(env, 'sendMessage', {
           chat_id: chatId,
           text: '🛠 لوحة التحكم:',
-          reply_markup: { inline_keyboard: [[{ text: '🛠 فتح لوحة التحكم', web_app: { url: env.MINIAPP_URL + '?admin=1' }, style: 'primary', icon_custom_emoji_id: ICON.info }]] },
+          reply_markup: { inline_keyboard: [[{ text: '🛠 فتح لوحة التحكم', web_app: { url: miniUrl(env, 'admin=1') }, style: 'primary', icon_custom_emoji_id: ICON.info }]] },
         });
       } else {
         await tg(env, 'sendMessage', { chat_id: chatId, text: 'هذه المنطقة للمشرف فقط.' });
@@ -1201,7 +1207,7 @@ async function handleUpdate(env, update, ctx2) {
       });
       if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + items.length, style: 'primary', icon_custom_emoji_id: ICON.dl }]);
       for (const row of extRows(aj, ext, kbk)) keyboard.push(row);
-      keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success', icon_custom_emoji_id: ICON.search }]);
+      keyboard.push([{ text: '🔍 تصفية النتائج في صفحة البحث', web_app: { url: miniUrl(env) }, style: 'success', icon_custom_emoji_id: ICON.search }]);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
         text: `🔍 نتائج البحث عن «${text}» — قناتك أولًا ثم القنوات${hasMore ? ' — الصفحة الأولى من ' + local.length : ' — ' + local.length}:`
@@ -1383,7 +1389,7 @@ async function sendWelcome(env, settings, chatId) {
   if (env.MAIN_CHANNEL) lastRow.push({ text: '📢 القناة الرئيسية', url: 'https://t.me/' + env.MAIN_CHANNEL, style: 'primary', icon_custom_emoji_id: ICON.mega });
   lastRow.push({ text: 'ℹ️ طريقة الاستخدام', callback_data: 'help', style: 'primary', icon_custom_emoji_id: ICON.info });
   const keyboard = [
-    [{ text: '🔍 فتح صفحة البحث', web_app: { url: env.MINIAPP_URL }, style: 'success', icon_custom_emoji_id: ICON.search }],
+    [{ text: '🔍 فتح صفحة البحث', web_app: { url: miniUrl(env) }, style: 'success', icon_custom_emoji_id: ICON.search }],
     [
       { text: '🆕 أحدث الإضافات', callback_data: 'latest', style: 'primary', icon_custom_emoji_id: ICON.book },
       { text: '⭐ المفضلة', callback_data: 'favs', style: 'primary', icon_custom_emoji_id: ICON.star },
