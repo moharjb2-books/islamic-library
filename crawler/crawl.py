@@ -298,6 +298,10 @@ def crawl_channel_embed(ch):
     if not max_id:
         print(f"== @{username}: embed probe failed", flush=True)
         return 0
+    if BACKFILL and ch.get("username", "").lower() == "cr_wrr":
+        print("== @cr_wrr: web backfill impossible (text_not_supported), skipping", flush=True)
+        print("BACKFILL_DONE", flush=True)
+        return 0
     if BACKFILL:
         cursor = int(ch.get("backfill_cursor") or 0)
         if cursor <= 0:

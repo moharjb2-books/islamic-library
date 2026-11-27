@@ -1182,7 +1182,7 @@ async function handleIngest(env, request) {
     if (r && r.meta && r.meta.changes > 0) added++;
   }
   if (channel && body.backfill_cursor) {
-    await env.DB.prepare('UPDATE channels SET backfill_cursor = ? WHERE username = ?')
+    await env.DB.prepare('UPDATE channels SET backfill_cursor = MIN(backfill_cursor, ?) WHERE username = ? AND backfill_cursor > 0')
       .bind(Number(body.backfill_cursor), channel).run();
   }
   if (channel && body.last_message_id) {
