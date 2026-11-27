@@ -11,6 +11,7 @@ database_id = "6fe9db87-a8c7-4a20-9a42-70e3f59a0457"
 [vars]
 BOT_USERNAME = "ISLAMIC_BOOKS_LIBbot"
 MAIN_CHANNEL = "cr_wrr"
+FORCED_CHANNELS = "cr_wrr"
 OWNER_ID = "8036989596"
 MINIAPP_URL = "https://moharjb2-books.github.io/islamic-library/miniapp/"
 

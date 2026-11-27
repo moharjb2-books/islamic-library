@@ -16,6 +16,10 @@ const tgServer = http.createServer((req, res) => {
     const method = req.url.split('/').pop();
     tgCalls.push({ method, body: JSON.parse(body || '{}') });
     let result = { ok: true, result: { status: 'member' } };
+    if (method === 'getChatMember') {
+      const uid = (JSON.parse(body || '{}') || {}).user_id;
+      if (uid === 555001) result = { ok: false, error_code: 400, description: 'Bad Request: user not found' };
+    }
     if (method === 'sendMessage' || method === 'copyMessage' || method === 'sendDocument') result = { ok: true, result: { message_id: 1 } };
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(result));
@@ -150,6 +154,36 @@ j = await apiSearch('مقمدة ابن خلدونن');
 check("'مقمدة ابن خلدونن' suggests خلدون books", Boolean(j.suggestions && j.suggestions[0] && /خلدون/.test(j.suggestions[0].title)), JSON.stringify(j.suggestions));
 j = await apiSearch('صحيح مسلمم');
 check("'صحيح مسلمم' suggests صحيح مسلم", Boolean(j.suggestions && j.suggestions[0] && /مسلم/.test(j.suggestions[0].title)), JSON.stringify(j.suggestions));
+
+// ---- forced-subscription gate stays ENFORCED while D1 is dead ----
+async function fireMsg(uid, text) {
+  tgCalls.length = 0;
+  await worker.fetch(new Request('http://local/tg/wh123', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ update_id: Date.now() % 100000, message: { message_id: 1, chat: { id: uid, type: 'private' }, from: { id: uid, first_name: 'N' }, text } }),
+  }), env, ctx());
+  await new Promise(r => setTimeout(r, 300));
+}
+await fireMsg(555001, 'ابن خلدون');
+{
+  const gate = tgCalls.find(c => c.method === 'sendMessage' && c.body.chat_id === 555001 && /اشترك في القنوات/.test(c.body.text || ''));
+  const mk = gate ? JSON.stringify(gate.body.reply_markup || {}) : '';
+  check('D1 dead: non-member search is gated', Boolean(gate) && mk.includes('recheck') && mk.includes('t.me/cr_wrr'), JSON.stringify(tgCalls).slice(0, 300));
+  check('D1 dead: gate leaks no results', !tgCalls.some(c => JSON.stringify(c.body).includes('dl:') || c.method === 'copyMessage' || c.method === 'sendDocument'), '');
+}
+await fireMsg(555001, '/start');
+check('D1 dead: non-member /start is gated', tgCalls.some(c => c.method === 'sendMessage' && c.body.chat_id === 555001 && /اشترك في القنوات/.test(c.body.text || '')), JSON.stringify(tgCalls).slice(0, 200));
+await fireMsg(555002, 'ابن خلدون');
+check('D1 dead: member search still returns results', tgCalls.some(c => (c.method === 'sendMessage' || c.method === 'copyMessage') && /dl:|copyMessage/.test(JSON.stringify(c.body) + c.method)), JSON.stringify(tgCalls).slice(0, 200));
+{
+  tgCalls.length = 0;
+  await worker.fetch(new Request('http://local/tg/wh123', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ update_id: Date.now() % 100000, callback_query: { id: 'cb1', from: { id: 555001, first_name: 'N' }, message: { message_id: 2, chat: { id: 555001, type: 'private' } }, data: 'recheck' } }),
+  }), env, ctx());
+  await new Promise(r => setTimeout(r, 300));
+  check('D1 dead: recheck while non-member alerts and does not pass', tgCalls.some(c => c.method === 'answerCallbackQuery' && /غير مشترك/.test(c.body.text || '')) && !tgCalls.some(c => /تم التحقق من اشتراكك/.test((c.body && c.body.text) || '')), JSON.stringify(tgCalls).slice(0, 300));
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

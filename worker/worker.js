@@ -703,11 +703,22 @@ async function forcedList(env) {
       }
     }
     forcedCache = { at: Date.now(), list };
-  } catch (e) {
-    // fail open: a config-read error must never lock searchers out
-    if (!forcedCache.list) forcedCache = { at: Date.now(), list: [] };
+    return forcedCache.list;
+  } catch (e) { snapNote(); }
+  // D1 unavailable: fall back to the env list, then the snapshot's published
+  // list, then the main-channel default. The gate must never silently turn
+  // off — fail closed, not open. Fallback lists are deliberately NOT cached
+  // in forcedCache so the live config takes over as soon as D1 recovers.
+  if (env.FORCED_CHANNELS) {
+    const l = String(env.FORCED_CHANNELS).split(',')
+      .map(x => x.trim().toLowerCase().replace(/^@/, '')).filter(Boolean);
+    if (l.length) return l;
   }
-  return forcedCache.list;
+  try {
+    const meta = await snapMeta();
+    if (Array.isArray(meta.forced_channels) && meta.forced_channels.length) return meta.forced_channels;
+  } catch (e) {}
+  return env.MAIN_CHANNEL ? [String(env.MAIN_CHANNEL).toLowerCase()] : [];
 }
 
 const memberCache = new Map();  // userId -> {at, missing}; Telegram calls are the slowest hop
@@ -805,8 +816,9 @@ async function handleUpdate(env, update, ctx2) {
     let text = (msg.text || '').trim();
 
     // Forced-subscription gate: everything below needs membership.
-    // Owner/admins and the admin-claim deep link bypass; the config read fails
-    // open so a database hiccup never locks searchers out.
+    // Owner/admins and the admin-claim deep link bypass. The channel list
+    // falls back to env/snapshot/main-channel when D1 is down, so the gate
+    // stays enforced during a database outage (fail closed).
     if (msg.chat.type === 'private' && !text.startsWith('/start admin_')
         && !isOwner(env, from.id) && !(await isAdmin(env, settings, from.id))) {
       const missing0 = await checkForced(env, from.id);
