@@ -3,7 +3,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import worker, { volInfo, volSort, smartQueries } from './worker.js';
+import worker, { volInfo, volSort, smartQueries, stripLeadingBookWord } from './worker.js';
 
 const SNAP_DIR = new URL('../snapshot', import.meta.url).pathname;
 const tgCalls = [];
@@ -564,6 +564,34 @@ for (const [p, b] of [
 {
   const { status, j } = await apiGet('/api/search?q=' + encodeURIComponent('عايز كتاب تفسير ابن كثير الطبعة القديمة دار السلام'));
   check('smart: api returns fallback results with query_used', status === 200 && (j.items || []).length > 0 && j.query_used === 'تفسير ابن كثير', JSON.stringify({ q: j.query_used, n: (j.items || []).length }).slice(0, 160));
+}
+
+
+// ---- a leading word كتاب is stripped and the rest is searched ----
+{
+  check('strip: كتاب + title', stripLeadingBookWord('كتاب تفسير ابن كثير') === 'تفسير ابن كثير', stripLeadingBookWord('كتاب تفسير ابن كثير'));
+  check('strip: كتاب: + title', stripLeadingBookWord('كتاب: صحيح البخاري') === 'صحيح البخاري', stripLeadingBookWord('كتاب: صحيح البخاري'));
+  check('strip: bare كتاب keeps the query', stripLeadingBookWord('كتاب') === 'كتاب', stripLeadingBookWord('كتاب'));
+  check('strip: كتابة is a different word', stripLeadingBookWord('كتابة الحديث') === 'كتابة الحديث', stripLeadingBookWord('كتابة الحديث'));
+  check('strip: no leading word untouched', stripLeadingBookWord('صحيح البخاري') === 'صحيح البخاري', '');
+}
+{
+  tgCalls.length = 0;
+  await fire({ update_id: Date.now() % 100000, message: { message_id: 21, chat: { id: 555007, type: 'private' }, from: { id: 555007, first_name: 'S' }, text: 'كتاب صحيح البخاري' } });
+  await new Promise(r => setTimeout(r, 500));
+  const a = tgCalls.filter(c => c.method === 'sendMessage' && c.body.chat_id === 555007).pop();
+  const idsA = ((((a && a.body.reply_markup) || {}).inline_keyboard) || []).flat().map(b => b.callback_data || '').filter(d => d.startsWith('dl:'));
+  tgCalls.length = 0;
+  await fire({ update_id: Date.now() % 100000, message: { message_id: 22, chat: { id: 555007, type: 'private' }, from: { id: 555007, first_name: 'S' }, text: 'صحيح البخاري' } });
+  await new Promise(r => setTimeout(r, 500));
+  const b2 = tgCalls.filter(c => c.method === 'sendMessage' && c.body.chat_id === 555007).pop();
+  const idsB = ((((b2 && b2.body.reply_markup) || {}).inline_keyboard) || []).flat().map(x => x.callback_data || '').filter(d => d.startsWith('dl:'));
+  check('strip: "كتاب صحيح البخاري" gives the same cards as "صحيح البخاري"', idsA.length > 0 && idsA.join(',') === idsB.join(','), idsA.slice(0, 3).join(',') + ' vs ' + idsB.slice(0, 3).join(','));
+  check('strip: reply stays cards only', (a && a.body.text) === '📚', (a && a.body.text || '').slice(0, 40));
+}
+{
+  const { status, j } = await apiGet('/api/search?q=' + encodeURIComponent('كتاب صحيح البخاري'));
+  check('strip: api strips it too', status === 200 && (j.items || []).length > 0 && !j.query_used, JSON.stringify({ n: (j.items || []).length, q: j.query_used }).slice(0, 120));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -1179,6 +1179,17 @@ let snapBaseDown = 0;
 // library has the book. When a search comes back empty the bot re-searches with
 // the words that carry meaning: what follows an author marker (للكاتب/تأليف/
 // بقلم), the head of the title, the trailing author name, or the longest word.
+// "كتاب تفسير ابن كثير" searches for "تفسير ابن كثير": a leading word كتاب is
+// the user naming the thing, not part of the title. Stripped for every query
+// length, before anything else.
+function stripLeadingBookWord(text) {
+  const t = String(text || '').trim();
+  const m = t.match(/^كتاب[\u064B-\u0652]*(?=$|[\s:،,.;\-–—])\s*[:،,.;\-–—]*\s*(.*)$/);
+  if (!m) return t;
+  const rest = (m[1] || '').trim();
+  return rest.length >= 2 ? rest : t;
+}
+
 const SMART_STOP = new Set(['كتاب', 'الكتاب', 'كتب', 'الكتب', 'اريد', 'عايز', 'محتاج', 'ابحث',
   'بحث', 'عن', 'في', 'من', 'على', 'الى', 'مع', 'او', 'ثم', 'لو', 'سمحت', 'ممكن', 'هل', 'ما',
   'هو', 'هي', 'هذا', 'هذه', 'نسخه', 'طبعه', 'دار', 'مكتبه', 'تحميل', 'رابط', 'ملف', 'pdf',
@@ -1696,6 +1707,7 @@ async function handleUpdate(env, update, ctx2) {
     if (text && !text.startsWith('/')) {
       // Plain search in chat
       if (text.length > 200) text = text.slice(0, 200);
+      text = stripLeadingBookWord(text);
       const perPage = parseInt(settings.per_page, 10) || 10;
       rememberQuery(chatId, text);
       const audioAsked = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(text);
@@ -2118,7 +2130,7 @@ async function handleApi(env, request, path, ctx2) {
   }
 
   if (path === '/api/search' || path === '/api/latest') {
-    const q = (url.searchParams.get('q') || '').slice(0, 120);
+    const q = stripLeadingBookWord((url.searchParams.get('q') || '').slice(0, 120));
     const ext = url.searchParams.get('ext') || 'all';
     const off = parseInt(url.searchParams.get('off') || '0', 10) || 0;
     const perPage = parseInt(settings.per_page, 10) || 10;
@@ -2582,4 +2594,4 @@ async function handleFetch(request, env, ctx) {
     return json({ error: 'not found' }, 404, false);
 }
 
-export { volInfo, volSort, smartQueries };
+export { volInfo, volSort, smartQueries, stripLeadingBookWord };
