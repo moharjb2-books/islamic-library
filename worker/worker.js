@@ -123,11 +123,18 @@ async function reindexNormV2(env) {
   await env.DB.prepare("INSERT INTO settings(key, value) VALUES('norm_v', '2') ON CONFLICT(key) DO UPDATE SET value = '2'").run();
 }
 
+const SCHEMA_VERSION = '4';
 async function migrate(env) {
   if (migrated) return;
   // After a failed attempt (DB capped/slow), back off a minute instead of
   // paying a hanging DDL round-trip on every request.
   if (Date.now() - migrateFailAt < 60000) return;
+  // DDL is a write. Every fresh isolate used to replay the whole schema; one
+  // settings read now skips it unless the version really changed.
+  try {
+    const v = await env.DB.prepare("SELECT value FROM settings WHERE key = 'schema_v'").first();
+    if (v && v.value === SCHEMA_VERSION) { migrated = true; return; }
+  } catch (e) { /* no settings table yet (fresh DB) or a transient error: run the DDL */ }
   try {
     await withTimeout((async () => {
       for (const stmt of SCHEMA) await env.DB.prepare(stmt).run();
@@ -141,6 +148,7 @@ async function migrate(env) {
     throw e;
   }
   migrated = true;
+  try { await env.DB.prepare("INSERT INTO settings(key, value) VALUES('schema_v', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(SCHEMA_VERSION).run(); } catch (e) {}
   try { await withTimeout(reindexNormV2(env), 4000); } catch (e) { migrated = false; migrateFailAt = Date.now(); }
   try { await withTimeout(backfillFts(env), 4000); } catch (e) {}
 }
@@ -871,9 +879,18 @@ async function isAdmin(env, settings, userId) {
   return ids.includes(String(userId));
 }
 
+const userWriteAt = new Map();  // userId -> last users-table write
 async function trackUser(env, from) {
   if (!from || !from.id) return;
   if (snapOn) return;  // known-down DB: do not pay a failing call on the reply path
+  // last_seen does not need minute accuracy: at most one write per user per 6h,
+  // but a changed name or username is written straight away.
+  const prev = userWriteAt.get(from.id);
+  const uname = from.username || '';
+  if (prev && prev.username === uname && Date.now() - prev.at < 6 * 3600 * 1000) return;
+  if (!(await mayWriteNonEssential(env))) return;
+  userWriteAt.set(from.id, { at: Date.now(), username: uname });
+  if (userWriteAt.size > 5000) userWriteAt.clear();
   try {
     await env.DB.prepare(
       `INSERT INTO users(user_id, first_name, username, last_seen) VALUES(?,?,?,unixepoch())
@@ -882,12 +899,76 @@ async function trackUser(env, from) {
   } catch (e) { snapNote(); }  // a capped DB must never kill the bot's reply path
 }
 
+// Search logging is the worker's biggest write source. It is now sampled
+// (every zero-result query for quality, plus 1 in 10 of the rest) and it stops
+// once the daily write budget is spent. Exact totals are kept in memory and
+// flushed to one settings row at most once a minute.
+let searchStats = { day: '', n: 0, zero: 0, flushedAt: 0 };
 async function logSearch(env, userId, q, results) {
   if (!q || !q.trim()) return;
+  const day = utcDay();
+  if (searchStats.day !== day) searchStats = { day, n: 0, zero: 0, flushedAt: 0 };
+  searchStats.n++;
+  if (!results) searchStats.zero++;
+  if (!(await mayWriteNonEssential(env))) return;
+  const keep = !results || Math.random() < 0.1;
+  if (keep) {
+    try {
+      await env.DB.prepare('INSERT INTO searches(user_id, q, results) VALUES(?,?,?)')
+        .bind(userId || 0, q.trim().slice(0, 200), results).run();
+      await addWriteUsage(env, 1);
+    } catch (e) {}
+  }
+  if (Date.now() - searchStats.flushedAt > 60000) {
+    searchStats.flushedAt = Date.now();
+    const snap = { day, n: searchStats.n, zero: searchStats.zero };
+    try {
+      await env.DB.prepare("INSERT INTO settings(key, value) VALUES('stats:searches', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(JSON.stringify(snap)).run();
+    } catch (e) {}
+  }
+}
+async function searchStatsRow(env) {
   try {
-    await env.DB.prepare('INSERT INTO searches(user_id, q, results) VALUES(?,?,?)')
-      .bind(userId || 0, q.trim().slice(0, 200), results).run();
+    const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'stats:searches'").first();
+    return row ? JSON.parse(row.value) : null;
+  } catch (e) { return null; }
+}
+
+// ---------- D1 daily write budget ----------
+// Free D1 allows 100k rows written per UTC day (the FTS trigger doubles an
+// insert). A bulk import can eat that in one run, and once it is gone every
+// write fails: the control panel and the bot look broken. Keep a reserve:
+// non-essential writes stop at the budget line, while search, delivery and the
+// admin panel keep working because they read the snapshot and cached counts.
+const D1_WRITE_CAP = 100000;
+const WRITE_BUDGET = 75000;  // 75% of the daily cap
+let writeUsageCache = { at: 0, used: 0, day: '' };
+function utcDay() { return new Date().toISOString().slice(0, 10); }
+async function writeUsed(env) {
+  const day = utcDay();
+  if (writeUsageCache.day === day && Date.now() - writeUsageCache.at < 60000) return writeUsageCache.used;
+  try {
+    const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind('w:' + day).first();
+    const used = parseInt((row && row.value) || '0', 10) || 0;
+    writeUsageCache = { at: Date.now(), used, day };
+    return used;
+  } catch (e) { return writeUsageCache.used || 0; }
+}
+async function addWriteUsage(env, n) {
+  const day = utcDay();
+  const used = (writeUsageCache.day === day ? writeUsageCache.used : 0) + n;
+  writeUsageCache = { at: Date.now(), used, day };
+  try {
+    await env.DB.prepare("INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + ? AS TEXT)")
+      .bind('w:' + day, String(n), n).run();
   } catch (e) {}
+}
+// Non-essential writes (search log, last_seen, crawler ingest) are allowed only
+// below the budget line. Everything a user needs to search and download is
+// read-only or served from the static snapshot.
+async function mayWriteNonEssential(env) {
+  return (await writeUsed(env)) < WRITE_BUDGET;
 }
 
 // ---------- search ----------
@@ -1969,22 +2050,24 @@ async function handleApi(env, request, path, ctx2) {
         // One parallel bounded batch: 9 sequential unbounded COUNTs used to
         // take seconds each on a slow or capped DB.
         const one = (sql) => withTimeout(env.DB.prepare(sql).first(), 1500);
-        const [files, users, usersToday, activeToday, searchesTotal, searchesToday, noResult, chans, forced] = await Promise.all([
+        const [files, users, usersToday, activeToday, searchesTotal, chans, forced] = await Promise.all([
           one('SELECT COUNT(*) AS c FROM files'),
           one('SELECT COUNT(*) AS c FROM users'),
           one("SELECT COUNT(*) AS c FROM users WHERE first_seen >= unixepoch('now','start of day')"),
           one("SELECT COUNT(*) AS c FROM users WHERE last_seen >= unixepoch('now','start of day')"),
           one('SELECT COUNT(*) AS c FROM searches'),
-          one("SELECT COUNT(*) AS c FROM searches WHERE created_at >= unixepoch('now','start of day')"),
-          one('SELECT COUNT(*) AS c FROM searches WHERE results = 0'),
           withTimeout(env.DB.prepare('SELECT * FROM channels ORDER BY added_at DESC').all(), 1500),
           withTimeout(env.DB.prepare('SELECT * FROM forced_channels ORDER BY username').all(), 1500),
         ]);
+        const ss = (await searchStatsRow(env)) || {};
+        const sameDay = ss.day === utcDay();
         const p = {
           files: files.c || 0, users: users.c || 0,
           users_today: usersToday.c || 0, active_today: activeToday.c || 0,
-          searches_total: searchesTotal.c || 0, searches_today: searchesToday.c || 0,
-          searches_no_result: noResult.c || 0,
+          searches_total: (searchesTotal.c || 0) + (ss.n || 0),
+          searches_today: sameDay ? (ss.n || 0) : 0,
+          searches_no_result: ss.zero || 0,
+          write_budget: { used: await writeUsed(env), cap: D1_WRITE_CAP, limit: WRITE_BUDGET },
           channels: chans.results || [], forced: forced.results || [], settings,
         };
         snapRecovered();
@@ -2188,6 +2271,11 @@ async function handleIngest(env, request) {
   }
 
   if (request.method !== 'POST') return json({ error: 'method' }, 405, false);
+  if (!(await mayWriteNonEssential(env))) {
+    // Daily write budget reached: stop ingesting rather than burn the reserve
+    // the control panel and the bot need. Search keeps working from the snapshot.
+    return json({ error: 'write_budget', added: 0, message: 'daily D1 write budget reached; ingest paused until 00:00 UTC' }, 429, false);
+  }
   const body = await request.json().catch(() => null);
   if (!body || !Array.isArray(body.items)) return json({ error: 'bad body' }, 400, false);
   const channel = String(body.channel || '').toLowerCase();
@@ -2217,6 +2305,9 @@ async function handleIngest(env, request) {
   if (channel && added > 0) {
     await env.DB.prepare('UPDATE channels SET file_count = file_count + ? WHERE username = ?').bind(added, channel).run();
   }
+  // Account for the bulk writes (insert + FTS index row) so the budget guard
+  // knows how much of the daily allowance the crawler used.
+  if (added > 0) await addWriteUsage(env, added * 2);
   return json({ ok: true, added }, 200, false);
 }
 
@@ -2243,6 +2334,23 @@ export default {
     }
   },
 };
+
+// Full-table COUNT(*) reads are expensive on D1 (one row read per row); the
+// monitor polls this route, so keep the numbers for five minutes.
+let d1CountsCache = { at: 0, v: null };
+async function d1Counts(env) {
+  if (d1CountsCache.v && Date.now() - d1CountsCache.at < 300000) return d1CountsCache.v;
+  const one = (sql) => env.DB.prepare(sql).first();
+  const [files, users, searches, channels] = await Promise.all([
+    one('SELECT COUNT(*) c FROM files'),
+    one('SELECT COUNT(*) c FROM users'),
+    one('SELECT COUNT(*) c FROM searches'),
+    one('SELECT COUNT(*) c FROM channels WHERE active = 1'),
+  ]);
+  const v = { files: files.c || 0, users: users.c || 0, searches: searches.c || 0, channels: channels.c || 0 };
+  d1CountsCache = { at: Date.now(), v };
+  return v;
+}
 
 async function handleFetch(request, env, ctx) {
     if (env.SNAPSHOT_BASE) SNAP_BASE = env.SNAPSHOT_BASE;
@@ -2276,13 +2384,8 @@ async function handleFetch(request, env, ctx) {
         const meta = await snapMeta();
         out.catalog = { files: meta.files || 0, channels: meta.channels || 0, generated_at: meta.generated_at || 0, chunks: meta.chunks || 0 };
       } catch (e) { out.catalog = { error: 'snapshot_unreachable' }; }
-      try {
-        const q1 = await env.DB.prepare('SELECT COUNT(*) c FROM files').first();
-        const q2 = await env.DB.prepare('SELECT COUNT(*) c FROM users').first();
-        const q3 = await env.DB.prepare('SELECT COUNT(*) c FROM searches').first();
-        const q4 = await env.DB.prepare('SELECT COUNT(*) c FROM channels WHERE active = 1').first();
-        out.d1 = { files: q1.c || 0, users: q2.c || 0, searches: q3.c || 0, channels: q4.c || 0 };
-      } catch (e) { out.d1 = { error: 'db_unavailable' }; }
+      try { out.d1 = await d1Counts(env); } catch (e) { out.d1 = { error: 'db_unavailable' }; }
+      out.write_budget = { used: await writeUsed(env), cap: D1_WRITE_CAP, limit: WRITE_BUDGET, blocked: !(await mayWriteNonEssential(env)) };
       return json(out, 200, false);
     }
 
