@@ -387,30 +387,48 @@ async function snapSearch(q, ext, offset, limit, includeAudio) {
   const POOL_MAX = 150;
   const CHUNK_FETCH_MAX = 20;
   const SCAN_MAX = 9000;
+  const BATCH = 60;
   const seq = ordered;  // null => walk cand newest-first
   const total = seq ? seq.length : cand.length;
+  const gAt = k => (seq ? seq[k] : cand[total - 1 - k]);
   const pool = [];
   const seenT = new Set();
-  const fetchedSet = new Set();
-  let fetched = 0;
-  for (let i = 0; i < total && pool.length < POOL_MAX && i < SCAN_MAX; i++) {
-    const g = seq ? seq[i] : cand[total - 1 - i];
-    const ci = Math.floor(g / 500);
-    const isNew = !fetchedSet.has(ci);
-    if (isNew && fetched >= CHUNK_FETCH_MAX) break;  // budget spent: stop here
-    let chunk;
-    try { chunk = await snapChunk(ci); }
-    catch (e) { fetchedSet.add(ci); continue; }
-    if (isNew) { fetchedSet.add(ci); fetched++; }
-    const r = chunk && chunk[g % 500];
-    if (!r) continue;
-    if (!extFilterOk(r[4], ext, includeAudio)) continue;
-    const row = snapRowFile(r);
-    if (junkRow(row)) continue;
-    const key = titleKey(row.file_name || row.title) || String(row.id);
-    if (seenT.has(key)) continue;
-    seenT.add(key);
-    pool.push(row);
+  const touched = new Set();  // chunk indexes this query is allowed to read
+  let i = 0;
+  while (i < total && pool.length < POOL_MAX && i < SCAN_MAX) {
+    // Look ahead over the next batch and pull every chunk it needs in parallel:
+    // a cold query touches ~20 chunk files and sequential fetches dominated the
+    // latency. The budget counts chunk indexes touched, not network fetches, so
+    // a warm call returns exactly the same pool and count as a cold one.
+    const need = [];
+    const inBatch = new Set();
+    for (let k = i; k < Math.min(total, i + BATCH); k++) {
+      const ci = Math.floor(gAt(k) / 500);
+      if (!touched.has(ci) && !inBatch.has(ci)) { inBatch.add(ci); need.push(ci); }
+    }
+    const room = Math.max(0, CHUNK_FETCH_MAX - touched.size);
+    const take = need.slice(0, room);
+    if (take.length) {
+      await Promise.all(take.map(ci => snapChunk(ci).catch(() => null)));
+      for (const ci of take) touched.add(ci);
+    }
+    for (let k = i; k < Math.min(total, i + BATCH) && pool.length < POOL_MAX; k++) {
+      const g = gAt(k);
+      const ci = Math.floor(g / 500);
+      if (!touched.has(ci)) break;  // budget spent before this candidate: stop here
+      let chunk = snapChunkCache.get(String(ci));
+      if (!chunk) chunk = await snapChunk(ci).catch(() => null);
+      const r = chunk && chunk[g % 500];
+      if (!r) continue;
+      if (!extFilterOk(r[4], ext, includeAudio)) continue;
+      const row = snapRowFile(r);
+      if (junkRow(row)) continue;
+      const key = titleKey(row.file_name || row.title) || String(row.id);
+      if (seenT.has(key)) continue;
+      seenT.add(key);
+      pool.push(row);
+    }
+    i += BATCH;
   }
   const sortedAll = volSort(pool);
   const hasMore = offset + limit < sortedAll.length;
