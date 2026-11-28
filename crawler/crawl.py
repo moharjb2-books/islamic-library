@@ -447,7 +447,14 @@ def crawl_channel(ch):
 
 
 def main():
-    for job in get_export_jobs():
+    # A capped or briefly unavailable D1 must never fail the scheduled run:
+    # the worker answers 503 there, and that used to kill the whole job.
+    try:
+        jobs = get_export_jobs()
+    except Exception as e:
+        print(f"export jobs unavailable (skipping): {e}", flush=True)
+        jobs = []
+    for job in jobs:
         try:
             run_export_job(job)
         except Exception as e:
