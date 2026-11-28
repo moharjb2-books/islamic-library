@@ -327,8 +327,9 @@ async function snapSearch(q, ext, offset, limit, includeAudio) {
   const words = nq.split(/\s+/).filter(Boolean).slice(0, 8).map(x => x.slice(0, 20));
   if (!words.length) {
     const latest = await snapGet('/latest.json');
-    const rows = (latest.items || []).map(snapRowFile).filter(f => extFilterOk(f.ext, ext, includeAudio));
-    return { items: rows.slice(offset, offset + limit), hasMore: offset + limit < rows.length };
+    const rows = (latest.items || []).map(snapRowFile)
+      .filter(f => !junkRow(f) && extFilterOk(f.ext, ext, includeAudio));
+    return { items: rows.slice(offset, offset + limit), hasMore: offset + limit < rows.length, counts: null };
   }
   const lists = (await Promise.all(words.map(snapPostings))).filter(l => l.length);
   if (lists.length < words.length) return { items: [], hasMore: false };
@@ -377,12 +378,14 @@ async function snapSearch(q, ext, offset, limit, includeAudio) {
     const r = chunks[ci][g % 500];
     if (!r) continue;
     if (!extFilterOk(r[4], ext, includeAudio)) continue;
-    matchedRows.push(snapRowFile(r));
+    const row = snapRowFile(r);
+    if (junkRow(row)) continue;
+    matchedRows.push(row);
   }
   if (pos !== last && (scanned >= 6000 || matchedRows.length >= MATCH_CAP)) truncated = true;
   const sortedAll = volSort(matchedRows);
   const hasMore = sortedAll.length > offset + limit || truncated;
-  return { items: sortedAll.slice(offset, offset + limit), hasMore };
+  return { items: sortedAll.slice(offset, offset + limit), hasMore, counts: { all: cand.length } };
 }
 // Volume-aware ordering: parts of one book (same title stem, differing only in
 // a number) appear 1, 2, 3 ... ascending; everything else keeps stream order.
@@ -487,7 +490,7 @@ async function snapSuggest(q, limit) {
     const r = chunks[ci][g % 500];
     if (!r) continue;
     const title = String(r[1] || '').trim();
-    if (!title) continue;
+    if (!title || junkRow(snapRowFile(r))) continue;
     const s = scoreRow(words, norm(title), norm(String(r[3] || '')));
     if (s.cover === 0 || s.score < 0.8) continue;
     scoredRows.push({ id: r[0], pretty: prettyTitle(title), ...s });
@@ -495,11 +498,16 @@ async function snapSuggest(q, limit) {
   return rankScored(scoredRows, limit, new Set());
 }
 async function getFileById(env, id) {
+  // Delivery ids come from search results. The snapshot covers the full
+  // catalog, D1 only a subset, so a D1 miss must fall through to the snapshot
+  // instead of answering "file no longer available".
   if (!snapOn) {
-    try { return await env.DB.prepare('SELECT * FROM files WHERE id = ?').bind(id).first(); }
-    catch (e) { snapNote(); }
+    try {
+      const row = await env.DB.prepare('SELECT * FROM files WHERE id = ?').bind(id).first();
+      if (row) return row;
+    } catch (e) { snapNote(); }
   }
-  return snapGetFileById(id);
+  try { return await snapGetFileById(id); } catch (e) { return null; }
 }
 async function setSetting(env, key, value) {
   await env.DB.prepare(
@@ -838,6 +846,33 @@ async function logSearch(env, userId, q, results) {
 const AUDIO_EXT_LIST = ['mp3','m4a','ogg','oga','opus','wav','aac','flac','weba','audio'];
 const AUDIO_EXTS = "('" + AUDIO_EXT_LIST.join("','") + "')";
 function isAudioExt(e) { return AUDIO_EXT_LIST.includes(String(e || '').toLowerCase()); }
+// User-facing lists show real books only. Archives (zip/rar/7z), images, video
+// and raw code-named dumps are indexed but never surfaced as library entries.
+const BOOK_EXT_LIST = ['pdf','epub','doc','docx','txt','rtf','mobi','azw3','azw','djvu','chm','ppt','pptx','xls','xlsx'];
+const BOOK_EXTS = "('" + BOOK_EXT_LIST.join("','") + "')";
+function isBookExt(e) { return BOOK_EXT_LIST.includes(String(e || '').toLowerCase()); }
+// Junk titles: scraped code names (Aqidah06050, osoul_3_alanguary_n2) and
+// leftovers that are not readable book names. Latin titles stay when they read
+// like a name; anything carrying digits or a bare short token is hidden.
+function junkTitle(t) {
+  const s = String(t || '').trim();
+  if (!s) return true;
+  const hasArabic = /[\u0621-\u064A]/.test(s);
+  if (!hasArabic) {
+    if (/\d/.test(s)) return true;
+    if (/[_]{1,}/.test(s)) return true;
+    if (s.length < 4) return true;
+    return false;
+  }
+  if (s.replace(/[^\p{L}]/gu, '').length < 3) return true;
+  return false;
+}
+// A row is worth showing when its format is a book and its name reads like one.
+function junkRow(r) {
+  const ext = String((r && r.ext) || '').toLowerCase();
+  if (!isBookExt(ext) && !isAudioExt(ext)) return true;
+  return junkTitle((r && (r.file_name || r.title)) || '');
+}
 
 async function searchFilesDB(env, q, ext, offset, limit, includeAudio) {
   const nq = norm(q);
@@ -859,19 +894,18 @@ async function searchFilesDB(env, q, ext, offset, limit, includeAudio) {
       binds.push(`%${w}%`, `%${w}%`);
     }
   }
-  if (ext && ext !== 'all') {
-    if (ext === 'audio') { where += ` AND f.ext IN ${AUDIO_EXTS}`; }
-    else { where += ' AND f.ext = ?'; binds.push(ext.toLowerCase()); }
-  } else if (!includeAudio) {
-    where += ` AND f.ext NOT IN ${AUDIO_EXTS}`;
-  }
-  binds.push(limit + 1, offset);
+  if (ext === 'audio') { where += ` AND f.ext IN ${AUDIO_EXTS}`; }
+  else if (ext && ext !== 'all') { where += ' AND f.ext = ?'; binds.push(ext.toLowerCase()); }
+  else if (includeAudio) { where += ` AND (f.ext IN ${BOOK_EXTS} OR f.ext IN ${AUDIO_EXTS})`; }
+  else { where += ` AND f.ext IN ${BOOK_EXTS}`; }
+  binds.push(limit + 2, offset);
   const rows = await env.DB.prepare(
     `SELECT f.* FROM ${from} WHERE ${where}
      ORDER BY f.created_at DESC, f.id DESC LIMIT ? OFFSET ?`
   ).bind(...binds).all();
-  const items = rows.results || [];
-  const hasMore = items.length > limit;
+  const raw = rows.results || [];
+  const items = raw.filter(r => !junkRow(r));
+  const hasMore = items.length > limit || raw.length > items.length;
   return { items: items.slice(0, limit), hasMore };
 }
 
@@ -888,6 +922,7 @@ async function countExtDB(env, q) {
   } else {
     for (const w of words) { where += ' AND (f.title_norm LIKE ? OR f.author_norm LIKE ?)'; binds.push(`%${w}%`, `%${w}%`); }
   }
+  where += ` AND (f.ext IN ${BOOK_EXTS} OR f.ext IN ${AUDIO_EXTS})`;
   const rows = await env.DB.prepare(
     `SELECT CASE WHEN f.ext IN ${AUDIO_EXTS} THEN 'audio' ELSE f.ext END AS k, COUNT(*) AS c
      FROM ${from} WHERE ${where} GROUP BY k`
@@ -901,13 +936,35 @@ async function countExtDB(env, q) {
 
 
 // Fallback-aware wrappers: try D1 first, flip to the static snapshot on error.
+// Last time the snapshot base failed to load (separate from snapOn, which
+// tracks D1 being down). Retried at most once a minute.
+let snapBaseDown = 0;
 async function searchFiles(env, q, ext, offset, limit, includeAudio) {
-  if (snapOn && !snapMaybeProbe()) return snapSearch(q, ext, offset, limit, includeAudio);
-  try {
-    const r = await withTimeout(searchFilesDB(env, q, ext, offset, limit, includeAudio), 3000);
-    snapRecovered();
-    return r;
-  } catch (e) { snapNote(); return await snapSearch(q, ext, offset, limit, includeAudio); }
+  // The static snapshot is the permanent catalog base: it holds every row from
+  // the complete D1 dump plus every staged export (341k+), so a D1 daily cap,
+  // a reset or a partial re-ingest can never shrink what users can find or the
+  // count they see. D1 is queried as a live extension on page 0 so books added
+  // after the snapshot was built show up immediately; the next rebuild folds
+  // them into the base.
+  let base = null;
+  if (Date.now() - snapBaseDown > 60000) {
+    try { base = await snapSearch(q, ext, offset, limit, includeAudio); }
+    catch (e) { snapBaseDown = Date.now(); }  // snapshot unreachable: serve from D1
+  }
+  if (!base) return await searchFilesDB(env, q, ext, offset, limit, includeAudio);
+  if (!snapOn && offset === 0) {
+    try {
+      const live = await withTimeout(searchFilesDB(env, q, ext, offset, limit, includeAudio), 2500);
+      const have = new Set(base.items.map(x => titleKey(x.file_name || x.title)));
+      const add = (live.items || []).filter(r => !have.has(titleKey(r.file_name || r.title)));
+      if (add.length) {
+        base.items = base.items.concat(add).slice(0, limit);
+        if (base.counts && base.counts.all) base.counts.all += add.length;
+      }
+      if (live.hasMore) base.hasMore = true;
+    } catch (e) {}
+  }
+  return base;
 }
 async function countExt(env, q) {
   if (snapOn) return null;
@@ -1734,13 +1791,16 @@ async function handleApi(env, request, path, ctx2) {
   const settings = await getSettings(env);
 
   if (path === '/api/stats') {
-    if (!snapOn) {
-      try {
-        const files = await env.DB.prepare('SELECT COUNT(*) AS c FROM files').first();
-        const channels = await env.DB.prepare('SELECT COUNT(*) AS c FROM channels WHERE active = 1').first();
-        return json({ files: files.c || 0, channels: channels.c || 0 });
-      } catch (e) { snapNote(); }
-    }
+    // Count what the user can actually reach: the full snapshot catalog.
+    try {
+      const meta = await snapMeta();
+      if (meta && meta.files) return json({ files: meta.files, channels: meta.channels || 0, snapshot: true });
+    } catch (e) {}
+    try {
+      const files = await env.DB.prepare('SELECT COUNT(*) AS c FROM files').first();
+      const channels = await env.DB.prepare('SELECT COUNT(*) AS c FROM channels WHERE active = 1').first();
+      return json({ files: files.c || 0, channels: channels.c || 0 });
+    } catch (e) { snapNote(); }
     const meta = await snapMeta();
     return json({ files: meta.files || 0, channels: meta.channels || 0, snapshot: true });
   }
@@ -1764,7 +1824,9 @@ async function handleApi(env, request, path, ctx2) {
       const u = await apiUser(env, request).catch(() => null);
       defer(ctx2, logSearch(env, u && u.id ? u.id : 0, q, local.length));
     }
-    const counts = q ? await countExt(env, q) : null;
+    // Counts come from the snapshot match set when it served the page (D1 only
+    // holds a subset, so its counts would understate the library).
+    const counts = q ? (sr.counts || await countExt(env, q)) : null;
     let suggestions = null;
     if (q && !local.length) { try { suggestions = await suggestTitles(env, q, 3); } catch (e) {} }
     const cap = local.length ? 2 : 3;
