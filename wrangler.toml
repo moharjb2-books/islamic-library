@@ -14,6 +14,8 @@ MAIN_CHANNEL = "cr_wrr"
 FORCED_CHANNELS = "cr_wrr"
 OWNER_ID = "8036989596"
 MINIAPP_URL = "https://moharjb2-books.github.io/islamic-library/miniapp/"
+# Read-only deep health key for the monitor agent (GET /health/deep?key=...)
+MONITOR_KEY = "e190dd8a4b975cd23700f8541d4b7af9"
 
 [triggers]
 crons = ["* * * * *"]

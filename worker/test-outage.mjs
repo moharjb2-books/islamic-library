@@ -184,7 +184,8 @@ check('bot search returns snapshot results with D1 dead', Boolean(resMsg && JSON
 {
   const mk = JSON.stringify((resMsg && resMsg.body.reply_markup) || {});
   const tx = (resMsg && resMsg.body.text) || '';
-  check('paged first page hides external sites (عرض المزيد only)', mk.includes('more:') && !mk.includes('hf.co') && !mk.includes('ketabonline.com') && !mk.includes('archive.org') && !mk.includes('/download/tafsir-ibn-kathir-01/'), mk.slice(0, 400));
+  // User's rule: external sites appear ONLY on the final page (no "عرض المزيد").
+  check('external sites never share a page with عرض المزيد', !mk.includes('more:') || (!mk.includes('ketabonline.com') && !mk.includes('archive.org') && !mk.includes('/download/tafsir-ibn-kathir-01/')), mk.slice(0, 400));
   check('irrelevant + non-Sunni + bulk external hits are dropped', !mk.includes('رياض الصالحين') && !mk.includes('riyad105') && !mk.includes('الكافي') && !mk.includes('الكليني') && !mk.includes('kafi.pdf') && !mk.includes('bulk-pack-99') && !mk.includes('بحار') && !mk.includes('كتاب آخر') && !mk.includes('العمل الصالح') && !mk.includes('7777') && !mk.includes('9999') && !mk.includes('8888'), mk.slice(0, 500));
 
   check('external titles are tag-stripped', !mk.includes('<mark>') && !mk.includes('<em>'), mk.slice(0, 200));
@@ -245,8 +246,15 @@ if (deliverable) {
 const apiR = await worker.fetch(new Request('http://local/api/search?q=' + encodeURIComponent('فقه')), env, ctx());
 const apiJ = await apiR.json();
 check('api/search works with D1 dead', Array.isArray(apiJ.items) && apiJ.items.length > 0, JSON.stringify(apiJ).slice(0, 200));
-check('api/search has-results carries external sources too', Array.isArray(apiJ.external) && apiJ.external.length > 0 && apiJ.external.some(e2 => e2.src === 'aj'), JSON.stringify(apiJ.external || []).slice(0, 200));
-check('external entries carry card metadata (kind + sizeMb + url)', apiJ.external.every(e2 => e2.url && 'kind' in e2 && 'sizeMb' in e2) && apiJ.external.some(e2 => e2.src === 'ia' && e2.kind === 'PDF'), JSON.stringify(apiJ.external || []).slice(0, 250));
+check('api/search page with more local results carries no external sources', Array.isArray(apiJ.external) && apiJ.external.length === 0, JSON.stringify(apiJ.external || []).slice(0, 200));
+let lastJ = apiJ, off2 = (apiJ.items || []).length;
+while (lastJ.hasMore && off2 < 400) {
+  const rr = await worker.fetch(new Request('http://local/api/search?q=' + encodeURIComponent('فقه') + '&off=' + off2), env, ctx());
+  lastJ = await rr.json();
+  off2 += (lastJ.items || []).length;
+}
+check('api/search final page carries external sources', Array.isArray(lastJ.external) && lastJ.external.length > 0 && lastJ.external.some(e2 => e2.src === 'aj'), JSON.stringify(lastJ.external || []).slice(0, 200));
+check('external entries carry card metadata (kind + sizeMb + url)', lastJ.external.every(e2 => e2.url && 'kind' in e2 && 'sizeMb' in e2) && lastJ.external.some(e2 => e2.src === 'ia' && e2.kind === 'PDF'), JSON.stringify(lastJ.external || []).slice(0, 250));
 check('api/search item titles are clean', apiJ.items.every(i2 => !/[_.](pdf|epub|docx)/i.test(i2.file_name || '')), (apiJ.items[0] || {}).file_name || '');
 
 // 5. api/stats falls back to snapshot meta
@@ -309,6 +317,35 @@ if (typoSug) {
 const sR = await worker.fetch(new Request('http://local/api/search?q=' + encodeURIComponent('مقمدة ابن خلدونن')), env, ctx());
 const sJ = await sR.json();
 check('api suggestions are {id,title} rows', Array.isArray(sJ.suggestions) && sJ.suggestions.length > 0 && Boolean(sJ.suggestions[0].id && sJ.suggestions[0].title), JSON.stringify(sJ.suggestions).slice(0, 200));
+
+// ---- paging must be complete, stable and duplicate-free ----
+{
+  const pq = 'رياض الصالحين';
+  const seenIds = new Set();
+  let dupes = 0, off = 0, pages = 0, more = true, emptyWithMore = false;
+  let countFirst = null, countStable = true;
+  while (more && pages < 25) {
+    const rr = await worker.fetch(new Request('http://local/api/search?q=' + encodeURIComponent(pq) + '&off=' + off), env, ctx());
+    const jj = await rr.json();
+    const c = jj.counts && jj.counts.all;
+    if (countFirst === null) countFirst = c;
+    else if (c !== countFirst) countStable = false;
+    if (!jj.items.length && jj.hasMore) { emptyWithMore = true; break; }
+    for (const it of jj.items) { if (seenIds.has(it.id)) dupes++; seenIds.add(it.id); }
+    off += jj.items.length;
+    pages++;
+    more = jj.hasMore;
+  }
+  check('paging: collects results', seenIds.size > 0, 'size=' + seenIds.size);
+  check('paging: no duplicate rows across pages', dupes === 0, 'dupes=' + dupes);
+  check('paging: hasMore turns false when exhausted', more === false);
+  check('paging: no empty page while hasMore is true', emptyWithMore === false);
+  check('paging: count identical on every page', countStable === true, 'first=' + countFirst);
+  check('paging: count equals rows served', countFirst === seenIds.size, 'count=' + countFirst + ' served=' + seenIds.size);
+  const r2 = await worker.fetch(new Request('http://local/api/search?q=' + encodeURIComponent(pq)), env, ctx());
+  const j2 = await r2.json();
+  check('paging: count stable across repeated calls', (j2.counts && j2.counts.all) === countFirst, JSON.stringify(j2.counts));
+}
 
 // ---- the user's typo-test set (snapshot suggester quality) ----
 async function apiSearch(q) {

@@ -357,6 +357,7 @@ async function loadMore() {
   if (r.error) { if (btn) { btn.disabled = false; btn.textContent = 'عرض المزيد ⬇'; } return toast(r.message || 'تعذّر التحميل'); }
   state.items = state.items.concat(r.items || []);
   state.hasMore = r.hasMore;
+  state.external = r.external || null;
   if (document.getElementById('results')) updateSearchResults(); else render();
 }
 
@@ -476,7 +477,8 @@ function resultsHtml() {
   const head = (!state.q && state.tab === 'search') ? `<div class="sec-head"><h2>أحدث الإضافات</h2></div>` : '';
   // External books merge into the same list right after the channel books:
   // no section headers, and the "load more" button stays below everything.
-  const extList = state.q ? extCardsHtml() : '';
+  // External sites only on the final page of results (user's rule).
+  const extList = (state.q && !state.hasMore) ? extCardsHtml() : '';
   let h = head + `<div class="list">${state.items.map(cardHtml).join('')}${extList}</div>`;
   if (state.hasMore) h += `<button class="more-btn" id="moreBtn" onclick="loadMore()">${state.loadingMore ? 'جارٍ التحميل...' : 'عرض المزيد ⬇ (' + (state.items.length) + ' معروضة)'}</button>`;
   return h;

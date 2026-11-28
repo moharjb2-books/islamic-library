@@ -287,7 +287,11 @@ let snapMetaCache = { at: 0, meta: null };
 
 async function snapGet(path) {
   const r = await fetch(SNAP_BASE + path, { cf: { cacheEverything: true, cacheTtl: 300 } });
-  if (!r.ok) throw new Error('snapshot ' + r.status + ' ' + path);
+  if (!r.ok) {
+    const err = new Error('snapshot ' + r.status + ' ' + path);
+    err.status = r.status;
+    throw err;
+  }
   return r.json();
 }
 async function snapMeta() {
@@ -306,10 +310,24 @@ function extFilterOk(e, ext, includeAudio) {
   if (ext && ext !== 'all') return ext === 'audio' ? aud : e === ext.toLowerCase();
   return includeAudio || !aud;
 }
+// Snapshot chunk cache: rows/cNNN.json files are immutable between rebuilds,
+// so caching them keeps repeated searches and paging fast inside an isolate.
+const snapChunkCache = new Map();
+async function snapChunk(ci) {
+  const key = String(ci);
+  if (snapChunkCache.has(key)) return snapChunkCache.get(key);
+  const rows = await snapGet('/rows/c' + key.padStart(3, '0') + '.json');
+  if (snapChunkCache.size > 60) snapChunkCache.clear();
+  snapChunkCache.set(key, rows);
+  return rows;
+}
 async function snapPostings(word) {
   let shard;
   try { shard = await snapGet('/idx/' + encodeURIComponent(word.slice(0, 2)) + '.json'); }
-  catch (e) { return []; }  // no shard for this prefix = no matches
+  catch (e) {
+    if (e && e.status === 404) return [];  // no shard for this prefix = no matches
+    throw e;  // snapshot unreachable: let searchFiles fall back to D1
+  }
   if (!shard || typeof shard !== 'object') return [];
   if (shard[word]) return shard[word];
   const out = [];
@@ -360,32 +378,43 @@ async function snapSearch(q, ext, offset, limit, includeAudio) {
       }
     }
   } catch (e) {}
-  // Collect the whole match set (bounded), then volume-sort BEFORE paging so
-  // multi-volume books come out 1, 2, 3 ... ascending across pages.
-  const MATCH_CAP = 500;
-  const matchedRows = [];
-  const chunks = {};
-  let pos = ordered ? 0 : cand.length - 1, scanned = 0, truncated = false;
-  const step = ordered ? 1 : -1;
-  const last = ordered ? ordered.length : -1;
-  while (pos !== last && matchedRows.length < MATCH_CAP && scanned < 6000) {
-    const g = ordered ? ordered[pos] : cand[pos]; pos += step; scanned++;
+  // Deterministic result pool. The same query always walks the same candidate
+  // sequence with the same fetch budget, so pages line up, no row repeats and
+  // the count never depends on who searched before. The pool is deduped and
+  // volume-sorted BEFORE paging, so multi-volume books come out 1, 2, 3 ...
+  // ascending across pages and displayed counts match the offsets the client
+  // sends back.
+  const POOL_MAX = 150;
+  const CHUNK_FETCH_MAX = 20;
+  const SCAN_MAX = 9000;
+  const seq = ordered;  // null => walk cand newest-first
+  const total = seq ? seq.length : cand.length;
+  const pool = [];
+  const seenT = new Set();
+  const fetchedSet = new Set();
+  let fetched = 0;
+  for (let i = 0; i < total && pool.length < POOL_MAX && i < SCAN_MAX; i++) {
+    const g = seq ? seq[i] : cand[total - 1 - i];
     const ci = Math.floor(g / 500);
-    if (!chunks[ci]) {
-      if (Object.keys(chunks).length >= 8) { truncated = true; break; }
-      chunks[ci] = await snapGet('/rows/c' + String(ci).padStart(3, '0') + '.json');
-    }
-    const r = chunks[ci][g % 500];
+    const isNew = !fetchedSet.has(ci);
+    if (isNew && fetched >= CHUNK_FETCH_MAX) break;  // budget spent: stop here
+    let chunk;
+    try { chunk = await snapChunk(ci); }
+    catch (e) { fetchedSet.add(ci); continue; }
+    if (isNew) { fetchedSet.add(ci); fetched++; }
+    const r = chunk && chunk[g % 500];
     if (!r) continue;
     if (!extFilterOk(r[4], ext, includeAudio)) continue;
     const row = snapRowFile(r);
     if (junkRow(row)) continue;
-    matchedRows.push(row);
+    const key = titleKey(row.file_name || row.title) || String(row.id);
+    if (seenT.has(key)) continue;
+    seenT.add(key);
+    pool.push(row);
   }
-  if (pos !== last && (scanned >= 6000 || matchedRows.length >= MATCH_CAP)) truncated = true;
-  const sortedAll = volSort(matchedRows);
-  const hasMore = sortedAll.length > offset + limit || truncated;
-  return { items: sortedAll.slice(offset, offset + limit), hasMore, counts: { all: cand.length } };
+  const sortedAll = volSort(pool);
+  const hasMore = offset + limit < sortedAll.length;
+  return { items: sortedAll.slice(offset, offset + limit), hasMore, counts: { all: sortedAll.length } };
 }
 // Volume-aware ordering: parts of one book (same title stem, differing only in
 // a number) appear 1, 2, 3 ... ascending; everything else keeps stream order.
@@ -952,16 +981,25 @@ async function searchFiles(env, q, ext, offset, limit, includeAudio) {
     catch (e) { snapBaseDown = Date.now(); }  // snapshot unreachable: serve from D1
   }
   if (!base) return await searchFilesDB(env, q, ext, offset, limit, includeAudio);
-  if (!snapOn && offset === 0) {
+  // Live extension: only the "latest additions" list merges rows that landed in
+  // D1 after the snapshot was built (deduped, page 0 only). Search results stay
+  // purely snapshot-based so paging offsets and counts never shift between
+  // callers; the next snapshot rebuild folds new rows into the base.
+  // A query the snapshot cannot answer may still exist in D1 (rows ingested
+  // after the last rebuild). Only consulted when the snapshot found nothing,
+  // so paging and counts stay identical for every caller.
+  if (!snapOn && q && !base.items.length && offset === 0) {
+    try {
+      const live = await withTimeout(searchFilesDB(env, q, ext, offset, limit, includeAudio), 2500);
+      if ((live.items || []).length) return { items: live.items, hasMore: live.hasMore, counts: await countExt(env, q).catch(() => null) };
+    } catch (e) {}
+  }
+  if (!snapOn && !q && offset === 0) {
     try {
       const live = await withTimeout(searchFilesDB(env, q, ext, offset, limit, includeAudio), 2500);
       const have = new Set(base.items.map(x => titleKey(x.file_name || x.title)));
       const add = (live.items || []).filter(r => !have.has(titleKey(r.file_name || r.title)));
-      if (add.length) {
-        base.items = base.items.concat(add).slice(0, limit);
-        if (base.counts && base.counts.all) base.counts.all += add.length;
-      }
-      if (live.hasMore) base.hasMore = true;
+      if (add.length) base.items = base.items.concat(add).slice(0, limit);
     } catch (e) {}
   }
   return base;
@@ -1781,6 +1819,7 @@ async function apiUser(env, request, body) {
   return validateInitData(env, initData);
 }
 
+let lastSearch = { ms: 0, at: 0, q: '', results: 0 };
 const ADMIN_DB_NOTICE = '⚠️ البيانات الحية غير متاحة مؤقتًا (الحد اليومي لقاعدة البيانات) — تُستأنف تلقائيًا. البحث وتحميل الكتب يعملان طبيعي.';
 function dbDown() {
   return json({ error: 'db_unavailable', message: ADMIN_DB_NOTICE }, 503);
@@ -1812,12 +1851,18 @@ async function handleApi(env, request, path, ctx2) {
     const perPage = parseInt(settings.per_page, 10) || 10;
     // Local channels and external libraries searched together, in parallel.
     const audioOnly = ext === 'audio';
-    const [sr, aj2, ext2, kb2] = await Promise.all([
-      searchFiles(env, q, ext, off, perPage),
-      q && !audioOnly ? ajSearch(env, q, 3).catch(() => []) : Promise.resolve([]),
-      q && !audioOnly ? iaSearch(env, q, 3).catch(() => []) : Promise.resolve([]),
-      q && !audioOnly ? kbSearch(env, q, 3).catch(() => []) : Promise.resolve([]),
-    ]);
+    const tSearch = Date.now();
+    const sr = await searchFiles(env, q, ext, off, perPage);
+    lastSearch = { ms: Date.now() - tSearch, at: Date.now(), q: String(q || '').slice(0, 60), results: (sr.items || []).length };
+    // External libraries are fetched only for the final page of results (the
+    // user's rule: local books first, external sites last), and never on the
+    // reply path when more local pages are still waiting.
+    const wantExt = q && !audioOnly && !sr.hasMore;
+    const [aj2, ext2, kb2] = wantExt ? await Promise.all([
+      ajSearch(env, q, 3).catch(() => []),
+      iaSearch(env, q, 3).catch(() => []),
+      kbSearch(env, q, 3).catch(() => []),
+    ]) : [[], [], []];
     const { items, hasMore } = sr;
     const local = polishLocal(items, env.MAIN_CHANNEL);
     if (q) {
@@ -2190,6 +2235,37 @@ async function handleFetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return json({ ok: true }, 200);
 
     if (path === '/health') return json({ ok: true, service: 'islamic-library' }, 200, false);
+
+    // Deep health for the monitor: bot-side facts the public endpoints cannot
+    // show (Telegram webhook backlog + last delivery error), real search
+    // latency, and catalog/D1 counts. Read-only, key-gated.
+    if (path === '/health/deep') {
+      const key = url.searchParams.get('key') || '';
+      if (!env.MONITOR_KEY || key !== env.MONITOR_KEY) return json({ error: 'unauthorized' }, 401, false);
+      const out = { ok: true, at: Math.floor(Date.now() / 1000) };
+      try {
+        const wh = await tg(env, 'getWebhookInfo', {});
+        const r = wh && wh.result;
+        out.webhook = r ? {
+          url: r.url || '', pending_update_count: r.pending_update_count || 0,
+          last_error_date: r.last_error_date || null, last_error_message: r.last_error_message || null,
+          max_connections: r.max_connections || null,
+        } : { error: 'no_result' };
+      } catch (e) { out.webhook = { error: String((e && e.message) || e).slice(0, 200) }; }
+      out.search = { last_ms: lastSearch.ms, last_at: lastSearch.at, q: lastSearch.q, results: lastSearch.results, base: snapOn ? 'd1_down_snapshot_only' : 'snapshot', d1_down: snapOn };
+      try {
+        const meta = await snapMeta();
+        out.catalog = { files: meta.files || 0, channels: meta.channels || 0, generated_at: meta.generated_at || 0, chunks: meta.chunks || 0 };
+      } catch (e) { out.catalog = { error: 'snapshot_unreachable' }; }
+      try {
+        const q1 = await env.DB.prepare('SELECT COUNT(*) c FROM files').first();
+        const q2 = await env.DB.prepare('SELECT COUNT(*) c FROM users').first();
+        const q3 = await env.DB.prepare('SELECT COUNT(*) c FROM searches').first();
+        const q4 = await env.DB.prepare('SELECT COUNT(*) c FROM channels WHERE active = 1').first();
+        out.d1 = { files: q1.c || 0, users: q2.c || 0, searches: q3.c || 0, channels: q4.c || 0 };
+      } catch (e) { out.d1 = { error: 'db_unavailable' }; }
+      return json(out, 200, false);
+    }
 
     if (path === `/tg/${env.WEBHOOK_SECRET}` && request.method === 'POST') {
       const update = await request.json().catch(() => null);
