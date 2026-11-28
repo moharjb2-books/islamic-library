@@ -3,7 +3,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import worker from './worker.js';
+import worker, { volInfo, volSort } from './worker.js';
 
 const SNAP_DIR = new URL('../snapshot', import.meta.url).pathname;
 const tgCalls = [];
@@ -459,6 +459,63 @@ for (const [p, b] of [
   const mk = m ? JSON.stringify(m.body.reply_markup || {}) : '';
   check('not-found still answers: suggestions + Sunni library search links', Boolean(m) && (m.body.text || '').includes('لم أجد') && mk.includes('shamela.ws/search?q=') && mk.includes('waqfeya.net/search?q=') && mk.includes('dorar.net/site/search?skeys=') && mk.includes('islamhouse.com/ar/search/'), JSON.stringify(m && m.body).slice(0, 300));
   check('not-found drops weak/irrelevant external hits entirely', !mk.includes('hf.co/') && !mk.includes('/download/') && !mk.includes('ketabonline.com/ar/books') && !mk.includes('/details/'), mk.slice(0, 300));
+}
+
+
+// ---- volume numbering: 1, 2, 3 ... ascending, Arabic digits and ordinals ----
+{
+  const v = t => volInfo(t).vol;
+  check('volume: trailing digit reads as volume', v('تفسير الطبري 8') === 8, String(v('تفسير الطبري 8')));
+  check('volume: leading zero digit reads as volume', v('01سلسلة تهذيب البداية والنهاية') === 1, String(v('01سلسلة تهذيب البداية والنهاية')));
+  check('volume: Arabic-Indic digits', v('المجلد ٨') === 8, String(v('المجلد ٨')));
+  check('volume: Arabic ordinal word', v('المجلد الثامن') === 8, String(v('المجلد الثامن')));
+  check('volume: compound ordinal (الحادي عشر) is 11', v('المجلد الحادي عشر') === 11, String(v('المجلد الحادي عشر')));
+  check('volume: compound ordinal (الثاني عشر) is 12 not 2', v('المجلد الثاني عشر') === 12, String(v('المجلد الثاني عشر')));
+  check('volume: compound ordinal (العشرون) is 20', v('المجلد العشرون') === 20, String(v('المجلد العشرون')));
+  check('volume: two halves of one volume sort أ before ب',
+    (volInfo('14 أ تفسير الطبري').part || 9) < (volInfo('14 ب تفسير الطبري').part || 9), '');
+  const fake = [
+    { id: 1, title: 'تفسير الطبري 8' }, { id: 2, title: 'تفسير الطبري 7' },
+    { id: 3, title: 'تفسير الطبري 10' }, { id: 4, title: 'كتاب آخر' },
+  ];
+  const order = volSort(fake).map(f => f.id).join(',');
+  check('volSort: 7 before 8 before 10', order === '2,1,3,4', order);
+}
+{
+  // Live snapshot: within one book, volumes never run backwards.
+  const j = await apiSearch('تفسير الطبري');
+  const items = j.items || [];
+  const metas = items.map(f => ({ ...volInfo(f.title), id: f.id, title: f.title }));
+  let backwards = null;
+  for (let i = 1; i < metas.length; i++) {
+    const a = metas[i - 1], b = metas[i];
+    if (a.stem && a.stem === b.stem && a.vol !== null && b.vol !== null && b.vol < a.vol) { backwards = a.title + ' -> ' + b.title; break; }
+  }
+  check('snapshot: multi-volume book lists volumes ascending', backwards === null, String(backwards).slice(0, 200));
+}
+{
+  // Paging must not depend on the search log (sampled, and blocked by the write
+  // budget): the bot remembers the query itself.
+  tgCalls.length = 0;
+  await fireMsg(555002, 'تفسير ابن كثير');
+  const p1 = tgCalls.filter(c => c.method === 'sendMessage' && c.body.chat_id === 555002).pop();
+  const kb1 = ((p1 && p1.body.reply_markup) || {}).inline_keyboard || [];
+  const flat1 = kb1.flat();
+  const more = flat1.find(b => (b.callback_data || '').startsWith('more:'));
+  const ids1 = flat1.map(b => b.callback_data || '').filter(d => d.startsWith('dl:'));
+  check('paging: first page offers عرض المزيد', Boolean(more), JSON.stringify(kb1).slice(0, 200));
+  check('paging: offset equals the number of cards shown', more && more.callback_data === 'more:' + ids1.length, more && more.callback_data);
+  tgCalls.length = 0;
+  await fire({ update_id: Date.now() % 100000, callback_query: { id: 'cbp1', from: { id: 555002, first_name: 'N' }, message: { message_id: 3, chat: { id: 555002, type: 'private' } }, data: more ? more.callback_data : 'more:20' } });
+  await new Promise(r => setTimeout(r, 400));
+  const p2 = tgCalls.filter(c => c.method === 'sendMessage' && c.body.chat_id === 555002).pop();
+  const flat2 = (((p2 && p2.body.reply_markup) || {}).inline_keyboard || []).flat();
+  const ids2 = flat2.map(b => b.callback_data || '').filter(d => d.startsWith('dl:'));
+  check('paging: second page shows cards with no search log (D1 dead)', ids2.length > 0 && !/أرسل كلمة البحث/.test((p2 && p2.body.text) || ''), JSON.stringify(p2 && p2.body).slice(0, 200));
+  check('paging: second page repeats none of the first page', ids2.every(id => !ids1.includes(id)), ids2.slice(0, 3).join(','));
+  const more2 = flat2.find(b => (b.callback_data || '').startsWith('more:'));
+  check('paging: next offset continues after page two', !more2 || more2.callback_data === 'more:' + (ids1.length + ids2.length), more2 && more2.callback_data);
+  check('paging: second page is cards only', (p2 && p2.body.text || '').startsWith('📚'), (p2 && p2.body.text || '').slice(0, 60));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

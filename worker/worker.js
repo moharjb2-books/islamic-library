@@ -443,29 +443,82 @@ async function snapSearch(q, ext, offset, limit, includeAudio) {
   return { items: sortedAll.slice(offset, offset + limit), hasMore,
            counts: { all: sortedAll.length, capped: pool.length >= POOL_MAX } };
 }
-// Volume-aware ordering: parts of one book (same title stem, differing only in
-// a number) appear 1, 2, 3 ... ascending; everything else keeps stream order.
+// Volume-aware ordering: parts of one book (same opening words, differing only
+// in a volume number) come out 1, 2, 3 ... ascending instead of whatever order
+// the index happened to produce (which showed vol 8 before vol 7). Numbers are
+// read from Latin or Arabic-Indic digits, or from Arabic ordinal words, and the
+// grouping key is the first significant words of the title, so "17 ب تفسير
+// الطبري من سورة الصف" and "16 تفسير الطبري من سورة سبأ" land in one group.
 const AR_DIGIT = { '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9' };
+const AR_ORDINAL = {
+  'الاول': 1, 'الحادي': 11, 'الثاني': 2, 'الثالث': 3, 'الرابع': 4, 'الخامس': 5,
+  'السادس': 6, 'السابع': 7, 'الثامن': 8, 'التاسع': 9, 'العاشر': 10,
+  'الحادى': 11, 'الثانى': 2, 'الثالثه': 3,
+};
+const VOL_WORDS = new Set(['ج', 'جزء', 'الجزء', 'مجلد', 'المجلد', 'القسم', 'ط', 'ب', 'أ', 'ا']);
+const PART_LETTER = { 'أ': 1, 'ا': 1, 'ب': 2, 'ج': 3, 'د': 4, 'هـ': 5, 'ه': 5 };
+const ORD_UNIT = { 'الاول': 1, 'الاولى': 1, 'الثاني': 2, 'الثانية': 2, 'الثاني': 2, 'الثالث': 3, 'الثالثة': 3,
+  'الرابع': 4, 'الرابعة': 4, 'الخامس': 5, 'الخامسة': 5, 'السادس': 6, 'السادسة': 6, 'السابع': 7, 'السابعة': 7,
+  'الثامن': 8, 'الثامنة': 8, 'التاسع': 9, 'التاسعة': 9, 'العاشر': 10, 'العاشرة': 10,
+  'الحادي': 1, 'الحادية': 1, 'الحاديه': 1 };
+const ORD_TEN = { 'العشرون': 20, 'الثلاثون': 30, 'الاربعون': 40, 'الخمسون': 50, 'الستون': 60,
+  'السبعون': 70, 'الثمانون': 80, 'التسعون': 90 };
+// "المجلد الثاني عشر" is volume 12, not 2: compounds are read before single words.
+function ordinalVol(tokens) {
+  const t = tokens.join(' ');
+  for (let i = 0; i < tokens.length; i++) {
+    const unit = ORD_UNIT[tokens[i]];
+    if (unit === undefined) {
+      if (ORD_TEN[tokens[i]] !== undefined) return ORD_TEN[tokens[i]];
+      continue;
+    }
+    const next = tokens[i + 1] || '';
+    if (next === 'عشر' || next === 'عشره' || next === 'العشر') return 10 + unit;
+    if (/عشرون/.test(next)) return 20 + unit;
+    if (next === 'و' && /عشرون/.test(tokens[i + 2] || '')) return 20 + unit;
+    return unit;
+  }
+  return null;
+}
 function volInfo(title) {
-  const t = String(title || '').replace(/[٠-٩]/g, d => AR_DIGIT[d]);
-  const m = t.match(/\d{1,4}/);
-  const vol = m ? parseInt(m[0], 10) : null;
-  const stem = norm(t.replace(/\d{1,4}/g, ' ')
-    .replace(/(^|\s)(ج|جزء|مجلد|المجلد|ط)(?=\s|$)/g, ' '))
-    .replace(/\s+/g, ' ').trim();
-  return { stem, vol };
+  const raw = String(title || '').replace(/[٠-٩]/g, d => AR_DIGIT[d]);
+  const rawTokens = raw.split(/\s+/).filter(Boolean);
+  let vol = null, part = null;
+  const numTok = rawTokens.findIndex(t => /\d{1,4}/.test(t));
+  if (numTok >= 0) {
+    vol = parseInt(rawTokens[numTok].match(/\d{1,4}/)[0], 10);
+    // "14 أ" / "14 ب": two halves of one volume, أ before ب.
+    const next = (rawTokens[numTok].match(/\d{1,4}/)[0].length === rawTokens[numTok].length)
+      ? (rawTokens[numTok + 1] || '') : rawTokens[numTok].replace(/^.*\d{1,4}/, '');
+    if (next && PART_LETTER[next] !== undefined) part = PART_LETTER[next];
+  }
+  const tokens = norm(raw.replace(/\d{1,4}/g, ' ')).split(/\s+/).filter(Boolean);
+  const kept = [];
+  for (const t of tokens) {
+    if (VOL_WORDS.has(t)) continue;
+    if (vol === null && /^(ال|الح)/.test(t) && (ORD_UNIT[t] !== undefined || ORD_TEN[t] !== undefined)) { kept.push(t); continue; }
+    kept.push(t);
+  }
+  if (vol === null) vol = ordinalVol(kept);
+  const sig = kept.filter(t => t.length > 1 && ORD_UNIT[t] === undefined && ORD_TEN[t] === undefined);
+  // Parts of one book share its name: group on the first three significant
+  // words so every volume of one edition sorts together, 1, 2, 3 ... while a
+  // different edition ("تفسير الطبري ت محمود شاكر") stays its own group.
+  const stem = sig.length >= 2 ? sig.slice(0, 3).join(' ') : kept.join(' ');
+  return { stem, vol, part };
 }
 function volSort(items) {
   const firstIdx = new Map();
   const meta = items.map((f, i) => {
     const v = volInfo(cleanTitle(f.file_name || f.title));
-    const key = v.stem || String(f.id);
+    const key = v.stem || ('#' + f.id);
     if (!firstIdx.has(key)) firstIdx.set(key, i);
-    return { f, key, vol: v.vol, i };
+    return { f, key, vol: v.vol, part: v.part, i };
   });
   meta.sort((a, b) =>
     (firstIdx.get(a.key) - firstIdx.get(b.key)) ||
     ((a.vol === null ? Infinity : a.vol) - (b.vol === null ? Infinity : b.vol)) ||
+    ((a.part === null ? 0 : a.part) - (b.part === null ? 0 : b.part)) ||
     (a.i - b.i));
   return meta.map(x => x.f);
 }
@@ -899,19 +952,34 @@ async function trackUser(env, from) {
   } catch (e) { snapNote(); }  // a capped DB must never kill the bot's reply path
 }
 
+// Paging state: the "عرض المزيد" button carries only an offset, so the bot has
+// to remember which query it belongs to. Memory first (no writes, survives D1
+// being capped or down), the search log as a fallback.
+const botLastQuery = new Map();  // chatId -> { q, at }
+function rememberQuery(chatId, q) {
+  if (!chatId || !q) return;
+  botLastQuery.set(String(chatId), { q: String(q).slice(0, 200), at: Date.now() });
+  if (botLastQuery.size > 2000) botLastQuery.clear();
+}
+function recallQuery(chatId) {
+  const hit = botLastQuery.get(String(chatId));
+  if (hit && Date.now() - hit.at < 3600 * 1000) return hit.q;
+  return '';
+}
+
 // Search logging is the worker's biggest write source. It is now sampled
 // (every zero-result query for quality, plus 1 in 10 of the rest) and it stops
 // once the daily write budget is spent. Exact totals are kept in memory and
 // flushed to one settings row at most once a minute.
 let searchStats = { day: '', n: 0, zero: 0, flushedAt: 0 };
-async function logSearch(env, userId, q, results) {
+async function logSearch(env, userId, q, results, force) {
   if (!q || !q.trim()) return;
   const day = utcDay();
   if (searchStats.day !== day) searchStats = { day, n: 0, zero: 0, flushedAt: 0 };
   searchStats.n++;
   if (!results) searchStats.zero++;
   if (!(await mayWriteNonEssential(env))) return;
-  const keep = !results || Math.random() < 0.1;
+  const keep = force || !results || Math.random() < 0.1;
   if (keep) {
     try {
       await env.DB.prepare('INSERT INTO searches(user_id, q, results) VALUES(?,?,?)')
@@ -1033,7 +1101,7 @@ async function searchFilesDB(env, q, ext, offset, limit, includeAudio) {
      ORDER BY f.created_at DESC, f.id DESC LIMIT ? OFFSET ?`
   ).bind(...binds).all();
   const raw = rows.results || [];
-  const items = raw.filter(r => !junkRow(r));
+  const items = volSort(raw.filter(r => !junkRow(r)));
   const hasMore = items.length > limit || raw.length > items.length;
   return { items: items.slice(0, limit), hasMore };
 }
@@ -1544,10 +1612,11 @@ async function handleUpdate(env, update, ctx2) {
       // Plain search in chat
       if (text.length > 200) text = text.slice(0, 200);
       const perPage = parseInt(settings.per_page, 10) || 10;
+      rememberQuery(chatId, text);
       const audioAsked = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(text);
       const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
       const local = polishLocal(items, env.MAIN_CHANNEL);
-      defer(ctx2, logSearch(env, from.id, text, local.length));
+      defer(ctx2, logSearch(env, from.id, text, local.length, true));
       // External sites come LAST: only fetched when this page is also the final
       // page (no عرض المزيد), or when there are no local results at all.
       const needExt = !audioAsked && (!local.length || !hasMore);
@@ -1584,7 +1653,7 @@ async function handleUpdate(env, update, ctx2) {
         }
         return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
-      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + items.length, style: 'primary', icon_custom_emoji_id: ICON.dl }]);
+      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + local.length, style: 'primary', icon_custom_emoji_id: ICON.dl }]);
       else for (const row of extRows(aj, ext, kbk)) keyboard.push(row);
       // Telegram rejects web_app buttons in groups (BUTTON_TYPE_INVALID):
       // there the button deep-links to the bot's Mini App over plain t.me.
@@ -1636,7 +1705,7 @@ async function handleUpdate(env, update, ctx2) {
         return;
       }
       const keyboard = items.map(f => {
-        const label = `📕 ${(f.file_name || f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
+        const label = `📕 ${String(f.title).slice(0, 40)} (${isAudioExt(f.ext) ? 'صوتي' : (f.ext || '').toUpperCase()} ${fmtSize(f.size_bytes)})`;
         if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary', icon_custom_emoji_id: ICON.book }];
         return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
@@ -1693,19 +1762,22 @@ async function handleUpdate(env, update, ctx2) {
     if (data.startsWith('more:')) {
       const off = parseInt(data.slice(5), 10) || 0;
       await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
-      let last = null;
-      try {
-        last = await env.DB.prepare(
-          'SELECT q FROM searches WHERE user_id = ? AND results > 0 ORDER BY id DESC LIMIT 1'
-        ).bind(cb.from.id).first();
-      } catch (e) { snapNote(); }
+      let last = { q: recallQuery(chatId) || recallQuery(cb.from.id) };
+      if (!last.q) {
+        try {
+          last = await env.DB.prepare(
+            'SELECT q FROM searches WHERE user_id = ? AND results > 0 ORDER BY id DESC LIMIT 1'
+          ).bind(cb.from.id).first();
+        } catch (e) { snapNote(); }
+      }
       if (!last || !last.q) {
         await tg(env, 'sendMessage', { chat_id: chatId, text: 'أرسل كلمة البحث من جديد لمتابعة النتائج.' });
         return;
       }
-      const perPage3 = 20;
+      const perPage3 = parseInt(settings2.per_page, 10) || 10;
       const audioAsked3 = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(last.q);
-      const { items, hasMore } = await searchFiles(env, last.q, 'all', off, perPage3, audioAsked3);
+      const { items: rawItems, hasMore } = await searchFiles(env, last.q, 'all', off, perPage3, audioAsked3);
+      const items = polishLocal(rawItems, env.MAIN_CHANNEL);
       // External sites appear only at the very end of paging.
       let extLastRows = [];
       if (!hasMore && !audioAsked3) {
@@ -1733,7 +1805,7 @@ async function handleUpdate(env, update, ctx2) {
       else for (const row of extLastRows) keyboard.push(row);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
-        text: `🔍 «${last.q}» — نتائج ${off + 1} إلى ${off + items.length}:`
+        text: '📚'
           + (!hasMore && extLastRows.length ? '\n\n🌐 ودي نتائج من المواقع الخارجية:' : ''),
         reply_markup: { inline_keyboard: keyboard },
       });
@@ -2401,3 +2473,5 @@ async function handleFetch(request, env, ctx) {
 
     return json({ error: 'not found' }, 404, false);
 }
+
+export { volInfo, volSort };
