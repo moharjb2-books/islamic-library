@@ -484,9 +484,16 @@ function resultsHtml() {
   return h;
 }
 
+function countText() {
+  const c = state.counts || {};
+  const n = (c.all || 0).toLocaleString('ar-EG');
+  if (c.capped) return `أفضل ${n} نتيجة من نتائج أكثر`;
+  return `وجدنا ${n} نتيجة مطابقة لبحثك`;
+}
+
 function subText() {
   return state.tab === 'favs' ? 'كتبك المحفوظة'
-    : (state.q && state.counts ? `وجدنا ${state.counts.all} نتيجة مطابقة لبحثك` : `أكثر من ${state.stats.files.toLocaleString('ar-EG')} ملف جاهز للتحميل`);
+    : (state.q && state.counts ? countText() : `أكثر من ${state.stats.files.toLocaleString('ar-EG')} ملف جاهز للتحميل`);
 }
 
 function updateSearchResults() {
@@ -509,7 +516,7 @@ function render() {
 
   const title = state.tab === 'favs' ? 'المفضلة' : (state.q ? 'نتائج البحث' : 'ماذا تريد أن تقرأ اليوم؟');
   const sub = state.tab === 'favs' ? 'كتبك المحفوظة'
-    : (state.q && state.counts ? `وجدنا ${state.counts.all} نتيجة مطابقة لبحثك` : `أكثر من ${state.stats.files.toLocaleString('ar-EG')} ملف جاهز للتحميل`);
+    : (state.q && state.counts ? countText() : `أكثر من ${state.stats.files.toLocaleString('ar-EG')} ملف جاهز للتحميل`);
 
   let body = '';
   if (state.tab === 'search') {

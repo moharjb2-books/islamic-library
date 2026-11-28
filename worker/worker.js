@@ -432,7 +432,8 @@ async function snapSearch(q, ext, offset, limit, includeAudio) {
   }
   const sortedAll = volSort(pool);
   const hasMore = offset + limit < sortedAll.length;
-  return { items: sortedAll.slice(offset, offset + limit), hasMore, counts: { all: sortedAll.length } };
+  return { items: sortedAll.slice(offset, offset + limit), hasMore,
+           counts: { all: sortedAll.length, capped: pool.length >= POOL_MAX } };
 }
 // Volume-aware ordering: parts of one book (same title stem, differing only in
 // a number) appear 1, 2, 3 ... ascending; everything else keeps stream order.
