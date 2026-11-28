@@ -594,5 +594,34 @@ for (const [p, b] of [
   check('strip: api strips it too', status === 200 && (j.items || []).length > 0 && !j.query_used, JSON.stringify({ n: (j.items || []).length, q: j.query_used }).slice(0, 120));
 }
 
+
+// ---- letter variants are the same letter in search (query and index) ----
+{
+  const pairs = [
+    ['صفوة الصفوة', 'صفوه الصفوه'],
+    ['إحياء علوم الدين', 'احياء علوم الدين'],
+    ['الأذكار', 'الاذكار'],
+    ['مقدمة ابن خلدون', 'مقدمه ابن خلدون'],
+  ];
+  for (const [a, b] of pairs) {
+    const ja = await apiSearch(a), jb = await apiSearch(b);
+    const ia = (ja.items || []).map(x => x.id).join(','), ib = (jb.items || []).map(x => x.id).join(',');
+    check(`letters: «${a}» and «${b}» return the same books`, (ja.items || []).length > 0 && ia === ib, ia.slice(0, 60) + ' vs ' + ib.slice(0, 60));
+  }
+}
+{
+  const j1 = await apiSearch('كتاب صفوة الصفوة'), j2 = await apiSearch('صفوة الصفوة');
+  const i1 = (j1.items || []).map(x => x.id).join(','), i2 = (j2.items || []).map(x => x.id).join(',');
+  check('strip: «كتاب صفوة الصفوة» searches «صفوة الصفوة»', (j1.items || []).length > 0 && i1 === i2, i1.slice(0, 60) + ' vs ' + i2.slice(0, 60));
+}
+{
+  tgCalls.length = 0;
+  await fire({ update_id: Date.now() % 100000, message: { message_id: 31, chat: { id: 555008, type: 'private' }, from: { id: 555008, first_name: 'S' }, text: 'كتاب صفوه الصفوه' } });
+  await new Promise(r => setTimeout(r, 500));
+  const m = tgCalls.filter(c => c.method === 'sendMessage' && c.body.chat_id === 555008).pop();
+  const ids = ((((m && m.body.reply_markup) || {}).inline_keyboard) || []).flat().map(b => b.callback_data || '').filter(d => d.startsWith('dl:'));
+  check('bot: «كتاب صفوه الصفوه» finds صفوة الصفوة', ids.length > 0 && (m.body.text === '📚'), JSON.stringify(m && m.body).slice(0, 200));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
