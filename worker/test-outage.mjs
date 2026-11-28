@@ -504,7 +504,8 @@ for (const [p, b] of [
   const more = flat1.find(b => (b.callback_data || '').startsWith('more:'));
   const ids1 = flat1.map(b => b.callback_data || '').filter(d => d.startsWith('dl:'));
   check('paging: first page offers عرض المزيد', Boolean(more), JSON.stringify(kb1).slice(0, 200));
-  check('paging: offset equals the number of cards shown', more && more.callback_data === 'more:' + ids1.length, more && more.callback_data);
+  const offOf = d => (String(d || '').split(':')[1] || '');
+  check('paging: offset equals the number of cards shown', more && offOf(more.callback_data) === String(ids1.length), more && more.callback_data);
   tgCalls.length = 0;
   await fire({ update_id: Date.now() % 100000, callback_query: { id: 'cbp1', from: { id: 555002, first_name: 'N' }, message: { message_id: 3, chat: { id: 555002, type: 'private' } }, data: more ? more.callback_data : 'more:20' } });
   await new Promise(r => setTimeout(r, 400));
@@ -514,8 +515,22 @@ for (const [p, b] of [
   check('paging: second page shows cards with no search log (D1 dead)', ids2.length > 0 && !/أرسل كلمة البحث/.test((p2 && p2.body.text) || ''), JSON.stringify(p2 && p2.body).slice(0, 200));
   check('paging: second page repeats none of the first page', ids2.every(id => !ids1.includes(id)), ids2.slice(0, 3).join(','));
   const more2 = flat2.find(b => (b.callback_data || '').startsWith('more:'));
-  check('paging: next offset continues after page two', !more2 || more2.callback_data === 'more:' + (ids1.length + ids2.length), more2 && more2.callback_data);
+  check('paging: next offset continues after page two', !more2 || offOf(more2.callback_data) === String(ids1.length + ids2.length), more2 && more2.callback_data);
   check('paging: second page is cards only', (p2 && p2.body.text || '').startsWith('📚'), (p2 && p2.body.text || '').slice(0, 60));
+}
+{
+  // The query travels in the button itself, so paging survives an isolate
+  // restart (no memory, no colo cache, no search log).
+  const enc = Buffer.from('تفسير ابن كثير', 'utf8').toString('base64url');
+  tgCalls.length = 0;
+  await fire({ update_id: Date.now() % 100000, callback_query: { id: 'cbp3', from: { id: 555004, first_name: 'N' }, message: { message_id: 4, chat: { id: 555004, type: 'private' } }, data: 'more:20:' + enc } });
+  await new Promise(r => setTimeout(r, 400));
+  const p3 = tgCalls.filter(c => c.method === 'sendMessage' && c.body.chat_id === 555004).pop();
+  const flat3 = (((p3 && p3.body.reply_markup) || {}).inline_keyboard || []).flat();
+  const ids3 = flat3.map(b => b.callback_data || '').filter(d => d.startsWith('dl:'));
+  check('paging: button carries the query (works with no state at all)', ids3.length > 0 && !/أرسل كلمة البحث/.test((p3 && p3.body.text) || ''), JSON.stringify(p3 && p3.body).slice(0, 200));
+  const more3 = flat3.find(b => (b.callback_data || '').startsWith('more:'));
+  check('paging: carried query survives to the next button', !more3 || more3.callback_data.startsWith('more:40:'), more3 && more3.callback_data);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

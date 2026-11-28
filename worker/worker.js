@@ -952,18 +952,56 @@ async function trackUser(env, from) {
   } catch (e) { snapNote(); }  // a capped DB must never kill the bot's reply path
 }
 
-// Paging state: the "عرض المزيد" button carries only an offset, so the bot has
-// to remember which query it belongs to. Memory first (no writes, survives D1
-// being capped or down), the search log as a fallback.
+// Paging state: the "عرض المزيد" button has to say which query it continues.
+// Three layers, cheapest first: the query travels inside the callback data when
+// it fits in Telegram's 64-byte limit, then an in-memory map, then the colo
+// cache, and only as a last resort the search log (which is sampled and stops
+// during a write-budget block, so it cannot be the primary source).
 const botLastQuery = new Map();  // chatId -> { q, at }
+function b64uEncode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64uDecode(str) {
+  try {
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/'));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  } catch (e) { return ''; }
+}
+function moreData(off, q) {
+  const plain = 'more:' + off;
+  if (!q) return plain;
+  const withQ = plain + ':' + b64uEncode(q);
+  return withQ.length <= 64 ? withQ : plain;
+}
 function rememberQuery(chatId, q) {
   if (!chatId || !q) return;
-  botLastQuery.set(String(chatId), { q: String(q).slice(0, 200), at: Date.now() });
+  const key = String(chatId);
+  botLastQuery.set(key, { q: String(q).slice(0, 200), at: Date.now() });
   if (botLastQuery.size > 2000) botLastQuery.clear();
+  try {
+    if (typeof caches !== 'undefined' && caches.default) {
+      const req = new Request('https://lastq.internal/' + encodeURIComponent(key));
+      caches.default.put(req, new Response(String(q).slice(0, 200), { headers: { 'cache-control': 'max-age=3600' } })).catch(() => {});
+    }
+  } catch (e) {}
 }
 function recallQuery(chatId) {
   const hit = botLastQuery.get(String(chatId));
   if (hit && Date.now() - hit.at < 3600 * 1000) return hit.q;
+  return '';
+}
+async function recallQueryCached(chatId) {
+  try {
+    if (typeof caches !== 'undefined' && caches.default) {
+      const res = await caches.default.match(new Request('https://lastq.internal/' + encodeURIComponent(String(chatId))));
+      if (res) return (await res.text()) || '';
+    }
+  } catch (e) {}
   return '';
 }
 
@@ -1653,7 +1691,7 @@ async function handleUpdate(env, update, ctx2) {
         }
         return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
-      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + local.length, style: 'primary', icon_custom_emoji_id: ICON.dl }]);
+      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: moreData(local.length, text), style: 'primary', icon_custom_emoji_id: ICON.dl }]);
       else for (const row of extRows(aj, ext, kbk)) keyboard.push(row);
       // Telegram rejects web_app buttons in groups (BUTTON_TYPE_INVALID):
       // there the button deep-links to the bot's Mini App over plain t.me.
@@ -1760,9 +1798,12 @@ async function handleUpdate(env, update, ctx2) {
       return;
     }
     if (data.startsWith('more:')) {
-      const off = parseInt(data.slice(5), 10) || 0;
+      const parts = data.split(':');
+      const off = parseInt(parts[1], 10) || 0;
       await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
-      let last = { q: recallQuery(chatId) || recallQuery(cb.from.id) };
+      let q = parts[2] ? b64uDecode(parts[2]) : '';
+      if (!q) q = recallQuery(chatId) || recallQuery(cb.from.id) || await recallQueryCached(chatId);
+      let last = { q };
       if (!last.q) {
         try {
           last = await env.DB.prepare(
@@ -1801,7 +1842,7 @@ async function handleUpdate(env, update, ctx2) {
         if (f.file_id || f.delivery === 'copy') return [{ text: label, callback_data: 'dl:' + f.id, style: 'primary', icon_custom_emoji_id: ICON.book }];
         return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
-      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: 'more:' + (off + items.length), style: 'primary', icon_custom_emoji_id: ICON.dl }]);
+      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: moreData(off + items.length, last.q), style: 'primary', icon_custom_emoji_id: ICON.dl }]);
       else for (const row of extLastRows) keyboard.push(row);
       await tg(env, 'sendMessage', {
         chat_id: chatId,
