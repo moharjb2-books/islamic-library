@@ -460,8 +460,13 @@ function extCardsHtml() {
 function resultsHtml() {
   if (state.loading) return `<div class="spin">جارٍ البحث...</div>`;
   if (!state.items.length) {
+    if (state.tab === 'favs') {
+      return `<div class="empty"><span class="big">⭐</span>لا توجد كتب محفوظة بعد.<br>اضغط ☆ على أي كتاب لحفظه هنا</div>`;
+    }
     if (!state.q) {
-      return `<div class="empty"><span class="big">📚</span>المكتبة قيد الفهرسة.<br>ستظهر الكتب هنا فور إضافتها.</div>`;
+      // The catalog is never "being indexed" (it holds 300k+ books): an empty
+      // latest list means the request failed or came back empty, so say that.
+      return `<div class="empty"><span class="big">📚</span>تعذّر تحميل القائمة الآن.<br>اسحب للتحديث أو ابحث باسم الكتاب.</div>`;
     }
     const sugHtml = (state.suggestions && state.suggestions.length)
       ? `<div class="sug"><div class="sug-lbl">هل تقصد:</div>
