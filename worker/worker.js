@@ -1174,6 +1174,53 @@ async function countExtDB(env, q) {
 // Last time the snapshot base failed to load (separate from snapOn, which
 // tracks D1 being down). Retried at most once a minute.
 let snapBaseDown = 0;
+// ---------- smart search: retry with the meaningful part of a phrase ----------
+// "كتاب تفسير ابن كثير الطبعة القديمة دار السلام" matches nothing although the
+// library has the book. When a search comes back empty the bot re-searches with
+// the words that carry meaning: what follows an author marker (للكاتب/تأليف/
+// بقلم), the head of the title, the trailing author name, or the longest word.
+const SMART_STOP = new Set(['كتاب', 'الكتاب', 'كتب', 'الكتب', 'اريد', 'عايز', 'محتاج', 'ابحث',
+  'بحث', 'عن', 'في', 'من', 'على', 'الى', 'مع', 'او', 'ثم', 'لو', 'سمحت', 'ممكن', 'هل', 'ما',
+  'هو', 'هي', 'هذا', 'هذه', 'نسخه', 'طبعه', 'دار', 'مكتبه', 'تحميل', 'رابط', 'ملف', 'pdf',
+  'doc', 'docx', 'للتحميل', 'كامله', 'نسخ', 'اجزاء', 'كل', 'جميع', 'افضل', 'احسن']);
+const SMART_AUTHOR_MARK = /(?:للكاتب|للمؤلف|للمولف|تأليف|تاليف|بقلم)\s+(.+)$/;
+function smartQueries(text) {
+  const raw = String(text || '')
+    .replace(/[«»"'’‘“”()\[\]{}،.,:;!?؟\-–—_/\\|]+/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+  const tokens = raw.split(' ').filter(Boolean);
+  const out = [];
+  const base = norm(raw);
+  const push = q => {
+    const v = String(q || '').replace(/\s+/g, ' ').trim();
+    if (v.length >= 3 && v.split(' ').length <= 6 && !out.includes(v) && norm(v) !== base) out.push(v);
+  };
+  const m = raw.match(SMART_AUTHOR_MARK);
+  if (m) push(m[1]);
+  const last = tokens[tokens.length - 1] || '';
+  if (/^لل.{3,}$/.test(last)) push(last.slice(2));
+  const sig = tokens.filter(t => t.length > 1 && !SMART_STOP.has(norm(t)));
+  if (sig.length >= 3) push(sig.slice(0, 3).join(' '));
+  if (sig.length >= 2) push(sig.slice(0, 2).join(' '));
+  if (tokens.length >= 3) push(tokens.slice(-2).join(' '));
+  if (tokens.length >= 4) push(tokens.slice(-3).join(' '));
+  if (sig.length) {
+    const longest = sig.slice().sort((a, b) => b.length - a.length)[0];
+    if (longest && longest.length >= 4) push(longest);
+  }
+  return out.slice(0, 4);
+}
+async function smartSearch(env, text, perPage, audioAsked) {
+  for (const cand of smartQueries(text)) {
+    try {
+      const r = await searchFiles(env, cand, 'all', 0, perPage, audioAsked);
+      const items = polishLocal(r.items, env.MAIN_CHANNEL);
+      if (items.length) return { q: cand, items, hasMore: r.hasMore, counts: r.counts };
+    } catch (e) {}
+  }
+  return null;
+}
+
 async function searchFiles(env, q, ext, offset, limit, includeAudio) {
   // The static snapshot is the permanent catalog base: it holds every row from
   // the complete D1 dump plus every staged export (341k+), so a D1 daily cap,
@@ -1652,16 +1699,27 @@ async function handleUpdate(env, update, ctx2) {
       const perPage = parseInt(settings.per_page, 10) || 10;
       rememberQuery(chatId, text);
       const audioAsked = /(صوتي|صوت|مسموع|تلاوه|تلاوة|استماع|استمع|mp3|audio)/i.test(text);
-      const { items, hasMore } = await searchFiles(env, text, 'all', 0, perPage, audioAsked);
-      const local = polishLocal(items, env.MAIN_CHANNEL);
-      defer(ctx2, logSearch(env, from.id, text, local.length, true));
+      let searchQ = text;
+      let found = await searchFiles(env, searchQ, 'all', 0, perPage, audioAsked);
+      let local = polishLocal(found.items, env.MAIN_CHANNEL);
+      // Nothing found: a short query is usually a typo'd title, so it keeps the
+      // "هل تقصد" path. A phrase (4+ words) gets the smart retry with the words
+      // that carry meaning, which is what he asked for.
+      let smartQ = null;
+      if (!local.length && !audioAsked && text.trim().split(/\s+/).length >= 4) {
+        const hit = await smartSearch(env, text, perPage, audioAsked).catch(() => null);
+        if (hit) { searchQ = hit.q; smartQ = hit.q; found = hit; local = polishLocal(hit.items, env.MAIN_CHANNEL); }
+      }
+      const { hasMore } = found;
+      rememberQuery(chatId, searchQ);
+      defer(ctx2, logSearch(env, from.id, searchQ, local.length, true));
       // External sites come LAST: only fetched when this page is also the final
       // page (no عرض المزيد), or when there are no local results at all.
       const needExt = !audioAsked && (!local.length || !hasMore);
       const [ajAll, iaAll, kbAll] = needExt ? await Promise.all([
-        ajSearch(env, text, 3),
-        iaSearch(env, text, 3),
-        kbSearch(env, text, 3),
+        ajSearch(env, searchQ, 3),
+        iaSearch(env, searchQ, 3),
+        kbSearch(env, searchQ, 3),
       ]) : [[], [], []];
       const extCap = local.length ? 2 : 3;
       const aj = (ajAll || []).slice(0, extCap);
@@ -1691,7 +1749,7 @@ async function handleUpdate(env, update, ctx2) {
         }
         return [{ text: label, url: f.link, style: 'primary', icon_custom_emoji_id: ICON.book }];
       });
-      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: moreData(local.length, text), style: 'primary', icon_custom_emoji_id: ICON.dl }]);
+      if (hasMore) keyboard.push([{ text: '⬇️ عرض المزيد', callback_data: moreData(local.length, searchQ), style: 'primary', icon_custom_emoji_id: ICON.dl }]);
       else for (const row of extRows(aj, ext, kbk)) keyboard.push(row);
       // Telegram rejects web_app buttons in groups (BUTTON_TYPE_INVALID):
       // there the button deep-links to the bot's Mini App over plain t.me.
@@ -1704,7 +1762,9 @@ async function handleUpdate(env, update, ctx2) {
         // Cards only: no header line, no per-source headers. Telegram needs
         // non-empty text, so it is a single neutral emoji. The buttons are one
         // ordered list: his channel, other channels, aljam3, archive.org, ketabonline.
-        text: '📚',
+        // Cards only. The one exception: when the bot quietly searched a part
+        // of the phrase instead, it says which words it used.
+        text: smartQ ? '🔍 ' + smartQ : '📚',
         reply_markup: { inline_keyboard: keyboard },
       });
       if (msg.chat.type !== 'private' && sr && !sr.ok) {
@@ -2065,33 +2125,40 @@ async function handleApi(env, request, path, ctx2) {
     // Local channels and external libraries searched together, in parallel.
     const audioOnly = ext === 'audio';
     const tSearch = Date.now();
-    const sr = await searchFiles(env, q, ext, off, perPage);
-    lastSearch = { ms: Date.now() - tSearch, at: Date.now(), q: String(q || '').slice(0, 60), results: (sr.items || []).length };
+    let usedQ = q;
+    let sr = await searchFiles(env, usedQ, ext, off, perPage);
+    if (q && off === 0 && !(sr.items || []).length && ext !== 'audio'
+        && q.trim().split(/\s+/).length >= 4) {
+      const hit = await smartSearch(env, q, perPage, false).catch(() => null);
+      if (hit) { usedQ = hit.q; sr = { items: hit.items, hasMore: hit.hasMore, counts: hit.counts }; }
+    }
+    lastSearch = { ms: Date.now() - tSearch, at: Date.now(), q: String(usedQ || '').slice(0, 60), results: (sr.items || []).length };
     // External libraries are fetched only for the final page of results (the
     // user's rule: local books first, external sites last), and never on the
     // reply path when more local pages are still waiting.
     const wantExt = q && !audioOnly && !sr.hasMore;
     const [aj2, ext2, kb2] = wantExt ? await Promise.all([
-      ajSearch(env, q, 3).catch(() => []),
-      iaSearch(env, q, 3).catch(() => []),
-      kbSearch(env, q, 3).catch(() => []),
+      ajSearch(env, usedQ, 3).catch(() => []),
+      iaSearch(env, usedQ, 3).catch(() => []),
+      kbSearch(env, usedQ, 3).catch(() => []),
     ]) : [[], [], []];
     const { items, hasMore } = sr;
     const local = polishLocal(items, env.MAIN_CHANNEL);
     if (q) {
       const u = await apiUser(env, request).catch(() => null);
-      defer(ctx2, logSearch(env, u && u.id ? u.id : 0, q, local.length));
+      defer(ctx2, logSearch(env, u && u.id ? u.id : 0, usedQ, local.length));
     }
     // Counts come from the snapshot match set when it served the page (D1 only
     // holds a subset, so its counts would understate the library).
-    const counts = q ? (sr.counts || await countExt(env, q)) : null;
+    const counts = q ? (sr.counts || await countExt(env, usedQ)) : null;
     let suggestions = null;
     if (q && !local.length) { try { suggestions = await suggestTitles(env, q, 3); } catch (e) {} }
     const cap = local.length ? 2 : 3;
     const external = (aj2 || []).slice(0, cap).map(a2 => ({ title: a2.title, url: a2.url, src: 'aj', kind: a2.kind || '', sizeMb: a2.sizeMb || 0 }))
       .concat((ext2 || []).slice(0, cap).map(e2 => ({ title: e2.title, url: e2.url, src: 'ia', kind: e2.kind || '', sizeMb: e2.sizeMb || 0 })))
       .concat((kb2 || []).slice(0, cap).map(k2 => ({ title: k2.title, url: k2.pdf || k2.url, src: 'kb', kind: k2.kind || '', sizeMb: k2.pdfSize || 0 })));
-    return json({ items: local.map(publicFile), hasMore, counts, suggestions, external });
+    return json({ items: local.map(publicFile), hasMore, counts, suggestions, external,
+      query_used: usedQ !== q ? usedQ : undefined });
   }
 
   if (path === '/api/me') {
@@ -2515,4 +2582,4 @@ async function handleFetch(request, env, ctx) {
     return json({ error: 'not found' }, 404, false);
 }
 
-export { volInfo, volSort };
+export { volInfo, volSort, smartQueries };

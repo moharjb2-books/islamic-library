@@ -3,7 +3,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import worker, { volInfo, volSort } from './worker.js';
+import worker, { volInfo, volSort, smartQueries } from './worker.js';
 
 const SNAP_DIR = new URL('../snapshot', import.meta.url).pathname;
 const tgCalls = [];
@@ -531,6 +531,39 @@ for (const [p, b] of [
   check('paging: button carries the query (works with no state at all)', ids3.length > 0 && !/أرسل كلمة البحث/.test((p3 && p3.body.text) || ''), JSON.stringify(p3 && p3.body).slice(0, 200));
   const more3 = flat3.find(b => (b.callback_data || '').startsWith('more:'));
   check('paging: carried query survives to the next button', !more3 || more3.callback_data.startsWith('more:40:'), more3 && more3.callback_data);
+}
+
+
+// ---- smart search: a long phrase falls back to its meaningful part ----
+{
+  const qs = smartQueries('عايز كتاب تفسير ابن كثير الطبعة القديمة دار السلام');
+  check('smart: candidate queries drop filler words', qs.includes('تفسير ابن كثير'), JSON.stringify(qs));
+  check('smart: author marker is honoured', smartQueries('البداية والنهاية للكاتب ابن كثير').includes('ابن كثير'), JSON.stringify(smartQueries('البداية والنهاية للكاتب ابن كثير')));
+  check('smart: never retries the phrase itself', !qs.some(x => x === 'عايز كتاب تفسير ابن كثير الطبعة القديمة دار السلام'), '');
+  check('smart: bounded candidate count', smartQueries('ا').length === 0 && qs.length <= 4, String(qs.length));
+}
+{
+  tgCalls.length = 0;
+  await fire({ update_id: Date.now() % 100000, message: { message_id: 11, chat: { id: 555005, type: 'private' }, from: { id: 555005, first_name: 'S' }, text: 'عايز كتاب تفسير ابن كثير الطبعة القديمة دار السلام' } });
+  await new Promise(r => setTimeout(r, 500));
+  const m = tgCalls.filter(c => c.method === 'sendMessage' && c.body.chat_id === 555005).pop();
+  const flat = (((m && m.body.reply_markup) || {}).inline_keyboard || []).flat();
+  const ids = flat.map(b => b.callback_data || '').filter(d => d.startsWith('dl:'));
+  check('smart: empty phrase still returns cards', ids.length > 0, JSON.stringify(m && m.body).slice(0, 200));
+  check('smart: reply names the words it searched', (m && m.body.text || '') === '🔍 تفسير ابن كثير', (m && m.body.text || '').slice(0, 80));
+  const more = flat.find(b => (b.callback_data || '').startsWith('more:'));
+  check('smart: paging continues the fallback query', !more || Buffer.from(String(more.callback_data).split(':')[2] || '', 'base64url').toString('utf8') === 'تفسير ابن كثير', more && more.callback_data);
+}
+{
+  tgCalls.length = 0;
+  await fire({ update_id: Date.now() % 100000, message: { message_id: 12, chat: { id: 555006, type: 'private' }, from: { id: 555006, first_name: 'S' }, text: 'كتاب غير موجود محليا ٩٩ زززز' } });
+  await new Promise(r => setTimeout(r, 600));
+  const m = tgCalls.filter(c => c.method === 'sendMessage' && c.body.chat_id === 555006).pop();
+  check('smart: a genuine miss still says لم أجد', Boolean(m) && /لم أجد/.test(m.body.text || ''), JSON.stringify(m && m.body).slice(0, 200));
+}
+{
+  const { status, j } = await apiGet('/api/search?q=' + encodeURIComponent('عايز كتاب تفسير ابن كثير الطبعة القديمة دار السلام'));
+  check('smart: api returns fallback results with query_used', status === 200 && (j.items || []).length > 0 && j.query_used === 'تفسير ابن كثير', JSON.stringify({ q: j.query_used, n: (j.items || []).length }).slice(0, 160));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
